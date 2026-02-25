@@ -224,9 +224,9 @@ footer{grid-row:6/7;grid-column:1/-1;font-size:10px;padding:4px 8px;color:#9ca3a
       <button class="upload-btn" id="browseBtn" type="button">Select Files</button>
     </div>
     <div id="fileListPreview" class="file-list"></div>
-    <div class="upload-formats">Supported: <strong>.json</strong> &nbsp; <strong>.jsonl</strong> &nbsp; — upload up to 8+ machine files at once</div>
+    <div class="upload-formats">Supported: <strong>.json</strong> &nbsp; <strong>.jsonl</strong> &nbsp; <strong>.csv</strong> &nbsp; <strong>.html</strong> &nbsp; <strong>.txt</strong> &nbsp; — upload up to 8+ machine files at once</div>
   </div>
-  <input type="file" id="fileInput" accept=".json,.jsonl,.txt" multiple />
+  <input type="file" id="fileInput" accept=".json,.jsonl,.txt,.csv,.tsv,.html,.htm" multiple />
 </div>
 
 <!-- ======================================================================
@@ -511,32 +511,53 @@ async function handleFiles(files) {
   preview.innerHTML = files.map(f => `<span class="file-tag">${f.name}</span>`).join("");
 
   try {
-    // Parse all files
+    // Parse all files — use streaming for large JSONL/txt files, full-text for smaller/other formats
     let allRecordsByFile = [];
     let parseDetails = [];
     for (let fi = 0; fi < files.length; fi++) {
       const file = files[fi];
-      updateProcessing(`Reading file ${fi + 1} of ${files.length}…`, file.name);
-      await yieldUI();
-      const text = await readFileText(file);
-      updateProcessing(`Parsing file ${fi + 1} of ${files.length}…`, file.name);
-      await yieldUI();
-      const records = await parseRecords(text);
-      parseDetails.push({ name: file.name, size: file.size, textLen: text.length, recordCount: records.length,
-        firstChars: text.trim().slice(0, 60), hasName: records.length > 0 && records[0].name !== undefined,
+      const ext = file.name.split(".").pop().toLowerCase();
+      const isStreamable = ["jsonl", "json", "txt", "tsv"].includes(ext);
+      const useStreaming = isStreamable && file.size > SMALL_FILE_LIMIT;
+
+      let records, firstChars, textLen;
+
+      if (useStreaming) {
+        // Large file: read in chunks to avoid browser memory limits
+        updateProcessing(`Streaming file ${fi + 1} of ${files.length}…`, `${file.name} (${(file.size / 1048576).toFixed(0)} MB)`);
+        await yieldUI();
+        // Read first 200 bytes for diagnostics
+        const probe = await readFileSlice(file, 0, Math.min(200, file.size));
+        firstChars = probe.replace(/^\uFEFF/, "").trim().slice(0, 60);
+        textLen = file.size; // approximate
+        records = await parseRecordsStreaming(file);
+      } else {
+        // Small file or non-streamable format (HTML, CSV): read entirely
+        updateProcessing(`Reading file ${fi + 1} of ${files.length}…`, file.name);
+        await yieldUI();
+        const text = await readFileText(file);
+        firstChars = text.trim().slice(0, 60);
+        textLen = text.length;
+        updateProcessing(`Parsing file ${fi + 1} of ${files.length}…`, file.name);
+        await yieldUI();
+        records = await parseRecords(text);
+      }
+      parseDetails.push({ name: file.name, size: file.size, textLen, recordCount: records.length,
+        firstChars, streaming: useStreaming, hasName: records.length > 0 && records[0].name !== undefined,
         hasTimestamp: records.length > 0 && records[0].eventTimestamp !== undefined });
       if (records.length) allRecordsByFile.push({ fileName: file.name, records });
     }
 
     if (!allRecordsByFile.length) {
       const diag = parseDetails.map(d =>
-        `• ${d.name} (${(d.size/1024).toFixed(0)}KB): ${d.recordCount} records parsed. ` +
+        `• ${d.name} (${(d.size/1048576).toFixed(1)}MB${d.streaming ? ", streamed" : ""}): ${d.recordCount} records parsed. ` +
         `Starts with: "${d.firstChars}…"`
       ).join("\n");
       console.error("Parse diagnostics:", parseDetails);
       throw new Error(
         `No valid records found in any file.\n\nDiagnostics:\n${diag}\n\n` +
-        `Supported formats: JSONL, JSON array, tab-delimited (8+ cols), CSV with headers, concatenated JSON.\n` +
+        `Supported formats: JSONL, JSON array, tab-delimited (8+ cols), CSV with headers, concatenated JSON, HTML dashboards.\n` +
+        `Large files (>200MB) are streamed in chunks — JSONL/JSON/TSV/TXT supported for streaming.\n` +
         `Each record needs at minimum: name, eventTimestamp, and numericValue (or textValue).`
       );
     }
@@ -649,6 +670,64 @@ function buildMachineBar() {
   }
 }
 
+/* ---- Normalise a single record's field names ---- */
+function normaliseRec(obj) {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return obj;
+  if (obj.textValue !== undefined && obj.stringValue === undefined) obj.stringValue = obj.textValue;
+  if (obj.ceqid !== undefined && obj.id === undefined) obj.id = obj.ceqid;
+  return obj;
+}
+
+/* ---- Parse one line of JSONL or tab-delimited ---- */
+function parseLine(line) {
+  line = line.trim();
+  if (!line) return null;
+  if (line.startsWith("{")) {
+    try { return normaliseRec(JSON.parse(line)); } catch (e) { return null; }
+  }
+  const parts = line.split("\t");
+  if (parts.length >= 8) {
+    const numVal = parts[4] ? parseFloat(parts[4]) : null;
+    const lat = parts.length > 8 && parts[8] ? parseFloat(parts[8]) : null;
+    const lon = parts.length > 9 && parts[9] ? parseFloat(parts[9]) : null;
+    return {
+      id: parts[0], nickname: parts[1], vin: parts[2], name: parts[3],
+      numericValue: Number.isFinite(numVal) ? numVal : null,
+      stringValue: parts[5] || null, uom: parts[6] || "", eventTimestamp: parts[7],
+      lat: Number.isFinite(lat) ? lat : null, lon: Number.isFinite(lon) ? lon : null
+    };
+  }
+  return null;
+}
+
+/* ---- Try to unwrap a wrapper object ---- */
+function unwrapIfNeeded(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === "object") {
+    for (const key of ["data", "records", "items", "rows", "results", "values"]) {
+      if (Array.isArray(parsed[key]) && parsed[key].length) return parsed[key];
+    }
+    for (const key of Object.keys(parsed)) {
+      if (Array.isArray(parsed[key]) && parsed[key].length) return parsed[key];
+    }
+    if (parsed.name || parsed.eventTimestamp || parsed.numericValue !== undefined) return [parsed];
+  }
+  return null;
+}
+
+/* ===========================================================================
+   Read a text chunk from a File using slice (bounded memory)
+   =========================================================================== */
+function readFileSlice(file, start, end) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Failed to read file chunk"));
+    reader.readAsText(file.slice(start, end), "utf-8");
+  });
+}
+
+/* Read full file as text — only used for small files (< threshold) */
 function readFileText(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -658,44 +737,81 @@ function readFileText(file) {
   });
 }
 
+/* ===========================================================================
+   STREAMING PARSER: reads file in chunks for large JSONL/tab files.
+   Keeps memory bounded — never loads entire file into a single string.
+   =========================================================================== */
+const CHUNK_SIZE = 32 * 1024 * 1024; // 32 MB per chunk
+
+async function parseRecordsStreaming(file) {
+  const records = [];
+  let leftover = ""; // partial line from previous chunk
+  let offset = 0;
+  let chunkNum = 0;
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+  while (offset < file.size) {
+    const end = Math.min(offset + CHUNK_SIZE, file.size);
+    chunkNum++;
+    updateProcessing(
+      `Reading chunk ${chunkNum} of ${totalChunks}…`,
+      `${records.length.toLocaleString()} records | ${((end / file.size) * 100).toFixed(0)}%`
+    );
+    await yieldUI();
+
+    let chunk = await readFileSlice(file, offset, end);
+
+    // Strip BOM from first chunk
+    if (offset === 0 && chunk.charCodeAt(0) === 0xFEFF) chunk = chunk.slice(1);
+
+    const combined = leftover + chunk;
+    leftover = "";
+
+    // Split into lines — last element may be partial
+    const lines = combined.split("\n");
+
+    // If this is not the last chunk, keep the last (possibly partial) line for next round
+    if (end < file.size) {
+      leftover = lines.pop();
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+      const rec = parseLine(lines[i]);
+      if (rec) records.push(rec);
+    }
+
+    offset = end;
+
+    // Yield to UI periodically even mid-chunk
+    if (chunkNum % 3 === 0) await yieldUI();
+  }
+
+  // Process any remaining leftover
+  if (leftover.trim()) {
+    const rec = parseLine(leftover);
+    if (rec) records.push(rec);
+  }
+
+  return records;
+}
+
+/* ===========================================================================
+   SMALL-FILE PARSER: for files small enough to load entirely into memory
+   (< 200 MB). Supports JSON array, wrapped JSON, CSV, concatenated JSON,
+   HTML dashboards, JSONL, tab-delimited.
+   =========================================================================== */
+const SMALL_FILE_LIMIT = 200 * 1024 * 1024; // 200 MB
+
 async function parseRecords(text) {
   /* ---- strip BOM ---- */
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
   const trimmed = text.trim();
   if (!trimmed) return [];
 
-  /* ---- helper: normalise a single record's field names ---- */
-  function normaliseRec(obj) {
-    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return obj;
-    // Map textValue → stringValue (data uses textValue, app expects stringValue)
-    if (obj.textValue !== undefined && obj.stringValue === undefined) {
-      obj.stringValue = obj.textValue;
-    }
-    // Map ceqid → id
-    if (obj.ceqid !== undefined && obj.id === undefined) {
-      obj.id = obj.ceqid;
-    }
-    return obj;
-  }
-
-  /* ---- helper: try to unwrap a wrapper object ---- */
-  function unwrapIfNeeded(parsed) {
-    if (Array.isArray(parsed)) return parsed;
-    if (parsed && typeof parsed === "object") {
-      // Look for first array-valued property (e.g. {data:[...]}, {records:[...]})
-      for (const key of ["data", "records", "items", "rows", "results", "values"]) {
-        if (Array.isArray(parsed[key]) && parsed[key].length) return parsed[key];
-      }
-      // Fallback: any array property
-      for (const key of Object.keys(parsed)) {
-        if (Array.isArray(parsed[key]) && parsed[key].length) return parsed[key];
-      }
-      // Single record object that looks like telemetry data
-      if (parsed.name || parsed.eventTimestamp || parsed.numericValue !== undefined) {
-        return [parsed];
-      }
-    }
-    return null;
+  /* ==== Strategy 0: HTML dashboard file (generated by Python script) ==== */
+  if (trimmed.startsWith("<") || trimmed.startsWith("<!DOCTYPE") || trimmed.includes("const RAW_DATA")) {
+    const extracted = extractFromHTML(trimmed);
+    if (extracted.length) return extracted;
   }
 
   const batchSize = 20000;
@@ -706,37 +822,16 @@ async function parseRecords(text) {
       const parsed = JSON.parse(trimmed);
       const arr = unwrapIfNeeded(parsed);
       if (arr && arr.length) return arr.map(normaliseRec);
-    } catch (e) { /* fall through to line-by-line strategies */ }
+    } catch (e) { /* fall through */ }
   }
 
-  /* ==== Strategy 2: JSONL (one JSON object per line) ==== */
+  /* ==== Strategy 2: JSONL / tab-delimited (line-by-line) ==== */
   const lines = text.split("\n");
   const records = [];
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    if (line.startsWith("{")) {
-      try { records.push(normaliseRec(JSON.parse(line))); } catch (e) { /* skip */ }
-    } else {
-      // Tab-delimited: support 8+ columns (not just 10)
-      const parts = line.split("\t");
-      if (parts.length >= 8) {
-        const numVal = parts[4] ? parseFloat(parts[4]) : null;
-        const lat = parts.length > 8 && parts[8] ? parseFloat(parts[8]) : null;
-        const lon = parts.length > 9 && parts[9] ? parseFloat(parts[9]) : null;
-        records.push({
-          id: parts[0], nickname: parts[1], vin: parts[2],
-          name: parts[3],
-          numericValue: Number.isFinite(numVal) ? numVal : null,
-          stringValue: parts[5] || null,
-          uom: parts[6] || "",
-          eventTimestamp: parts[7],
-          lat: Number.isFinite(lat) ? lat : null,
-          lon: Number.isFinite(lon) ? lon : null
-        });
-      }
-    }
+    const rec = parseLine(lines[i]);
+    if (rec) records.push(rec);
     if (i % batchSize === 0 && i > 0) {
       updateProcessing("Parsing records…", `${records.length.toLocaleString()} parsed so far`);
       await yieldUI();
@@ -762,13 +857,11 @@ async function parseRecords(text) {
   /* ==== Strategy 4: CSV (comma-separated with header row) ==== */
   if (lines.length >= 2 && lines[0].includes(",")) {
     const headerLine = lines[0].trim();
-    // Must contain recognisable telemetry column names
     const headerLower = headerLine.toLowerCase();
     if (headerLower.includes("name") && (headerLower.includes("timestamp") || headerLower.includes("time"))) {
       const headers = parseCSVRow(headerLine);
       const hMap = {};
       headers.forEach((h, idx) => { hMap[h.trim()] = idx; });
-      // Find column indices (case-insensitive search)
       const findCol = (...names) => {
         for (const n of names) {
           for (const h of Object.keys(hMap)) {
@@ -790,21 +883,15 @@ async function parseRecords(text) {
         if (!row) continue;
         const parts = parseCSVRow(row);
         const get = (idx) => idx >= 0 && idx < parts.length ? parts[idx].trim() : null;
-        const numRaw = get(ci.numVal);
-        const numVal = numRaw ? parseFloat(numRaw) : null;
-        const latRaw = get(ci.lat);
-        const lonRaw = get(ci.lon);
+        const numRaw = get(ci.numVal); const numVal = numRaw ? parseFloat(numRaw) : null;
+        const latRaw = get(ci.lat); const lonRaw = get(ci.lon);
         const lat = latRaw ? parseFloat(latRaw) : null;
         const lon = lonRaw ? parseFloat(lonRaw) : null;
         records.push({
-          id: get(ci.id), nickname: get(ci.nick), vin: get(ci.vin),
-          name: get(ci.name),
-          numericValue: Number.isFinite(numVal) ? numVal : null,
-          stringValue: get(ci.strVal),
-          uom: get(ci.uom) || "",
-          eventTimestamp: get(ci.ts),
-          lat: Number.isFinite(lat) ? lat : null,
-          lon: Number.isFinite(lon) ? lon : null
+          id: get(ci.id), nickname: get(ci.nick), vin: get(ci.vin), name: get(ci.name),
+          numericValue: Number.isFinite(numVal) ? numVal : null, stringValue: get(ci.strVal),
+          uom: get(ci.uom) || "", eventTimestamp: get(ci.ts),
+          lat: Number.isFinite(lat) ? lat : null, lon: Number.isFinite(lon) ? lon : null
         });
         if (i % batchSize === 0 && i > 0) {
           updateProcessing("Parsing CSV…", `${records.length.toLocaleString()} parsed`);
@@ -815,7 +902,95 @@ async function parseRecords(text) {
     }
   }
 
-  return records; // empty – caller will report error
+  return records;
+}
+
+/* Extract telemetry records from a Python-generated HTML dashboard file.
+   The HTML embeds: const RAW_DATA = [[ts, name, value, uom], ...]
+   and optionally: const MACHINE_INFO = {...}, const GPS_EVENTS = [...] */
+function extractFromHTML(html) {
+  const records = [];
+
+  // Extract RAW_DATA — compact 4-element tuple arrays: [timestamp, name, numericValue, uom]
+  const rawMatch = html.match(/const\s+RAW_DATA\s*=\s*(\[)/);  
+  if (rawMatch) {
+    const startIdx = rawMatch.index + rawMatch[0].length - 1; // position of [
+    // Find the matching closing bracket by counting depth
+    let depth = 0, endIdx = startIdx;
+    for (let i = startIdx; i < html.length && i < startIdx + 200_000_000; i++) {
+      if (html[i] === '[') depth++;
+      else if (html[i] === ']') { depth--; if (depth === 0) { endIdx = i + 1; break; } }
+    }
+    if (endIdx > startIdx) {
+      try {
+        const rawArr = JSON.parse(html.slice(startIdx, endIdx));
+        if (Array.isArray(rawArr)) {
+          // Extract MACHINE_INFO for nickname/vin if available
+          let nickname = "", vin = "";
+          const miMatch = html.match(/const\s+MACHINE_INFO\s*=\s*(\{[^;]{1,2000}\})/);
+          if (miMatch) {
+            try {
+              const mi = JSON.parse(miMatch[1]);
+              nickname = mi.nickname || "";
+              vin = mi.vin || "";
+            } catch(e) {}
+          }
+          for (const row of rawArr) {
+            if (!Array.isArray(row) || row.length < 2) continue;
+            records.push({
+              eventTimestamp: row[0],
+              name: row[1],
+              numericValue: (row.length > 2 && row[2] != null && Number.isFinite(Number(row[2]))) ? Number(row[2]) : null,
+              stringValue: (row.length > 2 && row[2] != null && !Number.isFinite(Number(row[2]))) ? String(row[2]) : null,
+              uom: row.length > 3 ? (row[3] || "") : "",
+              nickname: nickname,
+              vin: vin,
+              lat: null,
+              lon: null
+            });
+          }
+        }
+      } catch(e) {
+        console.warn("Failed to parse RAW_DATA from HTML:", e.message);
+      }
+    }
+  }
+
+  // If we got RAW_DATA records, also try to extract GPS_EVENTS for lat/lon
+  if (records.length) {
+    const gpsMatch = html.match(/const\s+GPS_EVENTS\s*=\s*(\[)/); 
+    if (gpsMatch) {
+      const gStart = gpsMatch.index + gpsMatch[0].length - 1;
+      let depth = 0, gEnd = gStart;
+      for (let i = gStart; i < html.length && i < gStart + 200_000_000; i++) {
+        if (html[i] === '[') depth++;
+        else if (html[i] === ']') { depth--; if (depth === 0) { gEnd = i + 1; break; } }
+      }
+      if (gEnd > gStart) {
+        try {
+          const gpsArr = JSON.parse(html.slice(gStart, gEnd));
+          if (Array.isArray(gpsArr)) {
+            // Build a timestamp => lat/lon lookup
+            const gpsLookup = new Map();
+            for (const g of gpsArr) {
+              if (g.time && g.lat != null && g.lon != null) {
+                gpsLookup.set(g.time, { lat: g.lat, lon: g.lon });
+              }
+            }
+            // Annotate records with GPS coordinates from matching timestamps
+            for (const rec of records) {
+              const gps = gpsLookup.get(rec.eventTimestamp);
+              if (gps) { rec.lat = gps.lat; rec.lon = gps.lon; }
+            }
+          }
+        } catch(e) {
+          console.warn("Failed to parse GPS_EVENTS from HTML:", e.message);
+        }
+      }
+    }
+  }
+
+  return records;
 }
 
 /* Simple CSV row parser (handles quoted fields with commas inside) */
