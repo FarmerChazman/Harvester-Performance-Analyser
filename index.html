@@ -541,7 +541,7 @@ async function handleFiles(files) {
       }
       if (!machineRecords.has(machineKey)) machineRecords.set(machineKey, { records: [], fileNames: [] });
       const entry = machineRecords.get(machineKey);
-      entry.records.push(...records);
+      for (let ri = 0; ri < records.length; ri++) entry.records.push(records[ri]);
       if (!entry.fileNames.includes(fileName)) entry.fileNames.push(fileName);
     }
 
@@ -558,9 +558,9 @@ async function handleFiles(files) {
 
       machineStore.set(machineKey, {
         info: { ...MACHINE_INFO },
-        seriesByParam: new Map(seriesByParam),
-        gpsEvents: [...GPS_EVENTS],
-        allParams: [...ALL_PARAMETERS],
+        seriesByParam: seriesByParam,
+        gpsEvents: GPS_EVENTS,
+        allParams: ALL_PARAMETERS,
         start: new Date(currentStart),
         end: new Date(currentEnd),
         fileNames: fileNames,
@@ -593,9 +593,9 @@ function switchToMachine(machineKey) {
   if (!data) return;
   activeMachineKey = machineKey;
   MACHINE_INFO = { ...data.info };
-  seriesByParam = new Map(data.seriesByParam);
-  GPS_EVENTS = [...data.gpsEvents];
-  ALL_PARAMETERS = [...data.allParams];
+  seriesByParam = data.seriesByParam;
+  GPS_EVENTS = data.gpsEvents;
+  ALL_PARAMETERS = data.allParams;
   currentStart = new Date(data.start);
   currentEnd = new Date(data.end);
   uploadedFileName = data.fileNames.join(", ");
