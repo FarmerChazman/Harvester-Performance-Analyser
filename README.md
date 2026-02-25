@@ -1,6 +1,8 @@
 # Harvester Performance Analyser
 
-A client-side web application for visualising combine harvester telemetry data. Upload a JSON or JSONL telemetry export, and the dashboard renders GPS tracks on a satellite map, interactive time-series charts, and a comprehensive KPI (Key Performance Indicator) summary — **entirely in your browser** with no data leaving your machine.
+A client-side web application for visualising combine harvester telemetry data. Upload one or multiple JSON/JSONL telemetry exports (one per machine), and the dashboard renders GPS tracks on a satellite map, interactive time-series charts, and a comprehensive KPI (Key Performance Indicator) summary — **entirely in your browser** with no data leaving your machine.
+
+Perfect for growers running a fleet of 6–8+ machines who need to review all harvesters from a single session.
 
 **[Launch the Web App →](https://FarmerChazman.github.io/Harvester-Performance-Analyser/)**
 
@@ -32,8 +34,9 @@ Combine harvesters produce thousands of telemetry records per session — engine
 - **An interactive satellite map** showing GPS tracks, speed, heading and telemetry at each point
 - **Time-series charts** for every sensor parameter, grouped by functional category
 - **A KPI summary report** with calculated hours, area, yield, fuel efficiency and data-quality badges
+- **Multi-machine support** — upload files for your entire fleet and switch between machines instantly
 
-Processing happens entirely in JavaScript in the browser. No server, no uploads, no accounts — just open the page and drag your file in.
+Processing happens entirely in JavaScript in the browser. No server, no uploads, no accounts — just open the page and drag your files in.
 
 ---
 
@@ -41,6 +44,8 @@ Processing happens entirely in JavaScript in the browser. No server, no uploads,
 
 | Feature | Description |
 |---------|-------------|
+| **Multi-File Upload** | Select or drag-drop multiple files at once — one per machine, up to 8+ |
+| **Fleet Machine Selector** | Purple machine bar lets you switch between harvesters instantly |
 | **Drag & Drop Upload** | JSON or JSONL files up to several hundred MB |
 | **Google Hybrid Satellite Map** | Leaflet map with Google satellite imagery, ESRI fallback, and OpenStreetMap option |
 | **Default Australia View** | Background map centred on Australia (–25.27, 133.78) at zoom 4 |
@@ -66,9 +71,11 @@ Processing happens entirely in JavaScript in the browser. No server, no uploads,
 ### Option A: Use the hosted version
 
 1. Navigate to **[https://FarmerChazman.github.io/Harvester-Performance-Analyser/](https://FarmerChazman.github.io/Harvester-Performance-Analyser/)**
-2. Drag your telemetry file onto the drop zone — or click **Select File**
-3. Wait for the processing spinner to finish
-4. Explore the dashboard!
+2. Drag your telemetry file(s) onto the drop zone — or click **Select Files**
+   - Upload a **single file** for one machine, or **multiple files** for your whole fleet
+3. Wait for the processing spinner to finish (each file is parsed and grouped by machine)
+4. If multiple machines are detected, use the **machine selector bar** to switch between them
+5. Explore the dashboard!
 
 ### Option B: Run locally
 
@@ -134,11 +141,31 @@ One JSON object per line (`.jsonl` or `.json` extension):
 | `lat` | number | Latitude (for GPS mapping) |
 | `lon` | number | Longitude (for GPS mapping) |
 
-Optional but recommended: `nickname` (machine name), `vin` (Vehicle Identification Number), `uom` (unit of measurement), `stringValue` (text fallback when numericValue is null).
+Optional but recommended: `nickname` (machine name — **used to identify each machine when uploading multiple files**), `vin` (Vehicle Identification Number — used as fallback machine identifier), `uom` (unit of measurement), `stringValue` (text fallback when numericValue is null).
+
+### Multi-File Upload — How Machine Grouping Works
+
+When you upload multiple files:
+
+1. Each file is parsed independently
+2. The app reads the `nickname` field (or `vin` as fallback) from the first 50 records to identify which machine the file belongs to
+3. If two files share the same `nickname`, their records are **merged** into one machine
+4. Each machine gets its own independent data store — switching machines is instant with no re-parsing
+5. If no `nickname` or `vin` is found, the **filename** is used as the machine identifier
 
 ---
 
 ## Dashboard Navigation
+
+### Machine Selector (Multi-Machine Mode)
+
+When you upload files for **multiple machines**, a purple machine selector bar appears between the header and the group tabs:
+
+- Each machine is shown as a **chip** with the machine name (from the `nickname` field) and record count
+- **Click a chip** to switch the entire dashboard — charts, map, KPIs and date range all update to that machine's data
+- The currently active machine is highlighted
+- Machines are identified automatically by the `nickname` or `vin` field in the telemetry records
+- If all files belong to the same machine, the selector bar is hidden
 
 ### Header
 
@@ -148,7 +175,7 @@ The header shows:
 - **Date filter** — set custom Start/End times and click **Apply** to zoom in
 - **Custom parameters dropdown** — select parameters to combine in a custom chart
 - **Create custom chart** — opens a modal with overlaid time-series for selected parameters
-- **Load New File** — return to the upload screen
+- **Load New File** — return to the upload screen (clears all machines)
 
 ### Group Tabs
 
