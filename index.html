@@ -1,0 +1,1858 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Harvester Performance Analyser</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Upload combine harvester telemetry data (JSON/JSONL) and instantly visualise GPS tracks, engine metrics, harvest performance KPIs, and more — all in your browser." />
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+/* ========================================================================
+   GLOBAL RESET & TYPOGRAPHY
+   ======================================================================== */
+*{box-sizing:border-box;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+body{margin:0;background:#f3f4f6;color:#111827}
+
+/* ========================================================================
+   UPLOAD / LANDING SCREEN
+   ======================================================================== */
+#uploadScreen{
+  position:fixed;inset:0;z-index:50000;
+  display:flex;align-items:center;justify-content:center;flex-direction:column;
+  background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 50%,#0f172a 100%);
+  transition:opacity .4s ease;
+}
+#uploadScreen.hidden{opacity:0;pointer-events:none}
+.upload-bg-map{position:absolute;inset:0;z-index:0;opacity:.22}
+.upload-content{position:relative;z-index:1;text-align:center;max-width:560px;padding:0 20px}
+.upload-logo{font-size:32px;font-weight:800;color:#ffffff;letter-spacing:-.5px;margin-bottom:6px}
+.upload-tagline{font-size:14px;color:#94a3b8;margin-bottom:32px}
+.upload-dropzone{
+  border:2px dashed #475569;border-radius:16px;padding:48px 32px;
+  background:rgba(30,58,95,.45);backdrop-filter:blur(8px);
+  cursor:pointer;transition:border-color .2s,background .2s;
+}
+.upload-dropzone:hover,.upload-dropzone.dragover{
+  border-color:#3b82f6;background:rgba(59,130,246,.12);
+}
+.upload-dropzone-icon{font-size:48px;margin-bottom:12px;color:#60a5fa}
+.upload-dropzone-text{font-size:16px;color:#e2e8f0;font-weight:500}
+.upload-dropzone-hint{font-size:12px;color:#64748b;margin-top:8px}
+.upload-btn{
+  display:inline-block;margin-top:20px;padding:10px 28px;
+  background:#2563eb;color:#fff;border:none;border-radius:8px;
+  font-size:14px;font-weight:600;cursor:pointer;transition:background .2s;
+}
+.upload-btn:hover{background:#1d4ed8}
+.upload-formats{font-size:11px;color:#64748b;margin-top:16px}
+#fileInput{display:none}
+
+/* ========================================================================
+   PROCESSING OVERLAY
+   ======================================================================== */
+#processingOverlay{
+  position:fixed;inset:0;z-index:60000;
+  display:none;align-items:center;justify-content:center;flex-direction:column;
+  background:rgba(15,23,42,.92);backdrop-filter:blur(4px);
+}
+#processingOverlay.active{display:flex}
+.spinner{
+  width:56px;height:56px;border:4px solid rgba(255,255,255,.15);
+  border-top-color:#3b82f6;border-radius:50%;
+  animation:spin 1s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+.processing-text{color:#e2e8f0;font-size:15px;margin-top:18px;font-weight:500}
+.processing-detail{color:#64748b;font-size:12px;margin-top:6px}
+
+/* ========================================================================
+   DASHBOARD LAYOUT (same as original output)
+   ======================================================================== */
+.page{display:grid;grid-template-rows:auto auto auto 1fr auto;grid-template-columns:1fr;height:100vh}
+header{grid-row:1/2;padding:10px 16px;display:flex;justify-content:space-between;align-items:flex-start;background:#fff;border-bottom:1px solid #e5e7eb}
+.header-left{display:flex;flex-direction:column;gap:2px}
+.header-right{display:flex;flex-direction:column;align-items:flex-end;gap:6px;font-size:11px}
+header .machine-title{font-size:18px;font-weight:600}
+header .machine-meta{font-size:12px;color:#6b7280}
+
+/* Filters */
+.header-filters{display:flex;align-items:center;gap:12px}
+.date-range-block{display:flex;align-items:center;gap:6px;font-size:11px}
+.date-range-block label{font-size:11px;color:#4b5563}
+.date-range-block input[type="datetime-local"]{padding:3px 4px;font-size:11px;border-radius:3px;border:1px solid #d1d5db;min-width:170px}
+#applyRangeBtn{padding:4px 10px;font-size:11px;border-radius:3px;border:1px solid #2563eb;background:#2563eb;color:#fff;cursor:pointer;font-weight:500;white-space:nowrap}
+#applyRangeBtn:hover{background:#1d4ed8;border-color:#1d4ed8}
+#loadNewFileBtn{padding:4px 10px;font-size:11px;border-radius:3px;border:1px solid #ef4444;background:#ef4444;color:#fff;cursor:pointer;font-weight:500;white-space:nowrap}
+#loadNewFileBtn:hover{background:#dc2626}
+
+/* Group tabs */
+.group-tabs{grid-row:2/3;display:flex;align-items:stretch;background:#f9fafb;border-bottom:1px solid #e5e7eb;padding:0 8px;overflow-x:auto}
+.group-tab{padding:10px 18px;cursor:pointer;font-size:14px;color:#4b5563;background:#f3f4f6;border-radius:2px 2px 0 0;border:1px solid transparent;border-bottom:none;margin-right:4px;display:flex;align-items:center;justify-content:center;min-width:160px;white-space:nowrap}
+.group-tab.active{background:#fff;color:#111827;border-color:#e5e7eb;border-bottom-color:#fff;font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+
+/* Subgroup pills */
+.subgroup-row{grid-row:3/4;padding:6px 16px;background:#fff;border-bottom:1px solid #e5e7eb;display:flex;flex-wrap:wrap;gap:6px;overflow-x:auto}
+.subgroup-chip{font-size:12px;padding:4px 12px;border-radius:2px;border:1px solid #d1d5db;cursor:pointer;background:#f9fafb;color:#4b5563;min-width:110px;text-align:center;white-space:nowrap}
+.subgroup-chip.active{background:#111827;color:#fff;border-color:#111827;font-weight:500}
+
+/* Parameter dropdown */
+.param-dropdown{position:relative;font-size:11px}
+#paramDropdownToggle{padding:4px 10px;font-size:11px;border-radius:3px;border:1px solid #d1d5db;background:#fff;color:#111827;cursor:pointer;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+#paramDropdownToggle span.badge-count{font-size:10px;padding:1px 5px;border-radius:999px;background:#111827;color:#fff}
+.param-menu{position:absolute;top:110%;right:0;width:320px;max-height:360px;overflow-y:auto;background:#fff;border-radius:6px;border:1px solid #d1d5db;box-shadow:0 8px 18px rgba(15,23,42,.18);padding:6px 0;z-index:40;display:none}
+.param-menu.open{display:block}
+.param-section-title{font-size:11px;font-weight:600;padding:4px 12px;color:#4b5563;background:#f9fafb}
+.param-divider{height:1px;margin:4px 0;background:#e5e7eb}
+.param-option{padding:4px 12px;font-size:11px;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+.param-option:hover{background:#f3f4ff}
+.param-option span.tick{font-size:11px;color:#2563eb;visibility:hidden}
+.param-option.selected span.tick{visibility:visible}
+
+/* Content + Chart Grid */
+.content{grid-row:4/5;grid-column:1/-1;padding:10px 16px 14px;overflow-y:auto}
+.content.map-mode{padding:0;overflow:hidden}
+.charts-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.charts-grid.map-mode{display:block;height:100%}
+.chart-card{background:#fff;border-radius:8px;border:1px solid #e5e7eb;padding:8px 8px 4px;display:flex;flex-direction:column;min-height:340px;box-shadow:0 1px 3px rgba(15,23,42,.06)}
+.chart-card.full-width{grid-column:1/-1}
+.chart-card.map-card{min-height:500px;position:relative}
+.chart-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.chart-title{font-size:13px;font-weight:600;color:#111827}
+.chart-subtitle{font-size:10px;color:#6b7280}
+.chart-tools button{border:none;background:transparent;cursor:pointer;font-size:14px;color:#6b7280;padding:0 4px}
+.chart-tools button:hover{color:#111827}
+.chart-plot{flex:1;min-height:280px}
+.chart-empty{font-size:11px;color:#9ca3af;padding:8px;text-align:center;margin-top:20px}
+
+/* Map */
+.map-root{position:relative;width:100%;height:100%}
+#mapContainer{width:100%;height:100%;min-height:0;border-radius:4px;overflow:hidden;position:relative;z-index:0}
+.content.map-mode #mapContainer{border-radius:0}
+.map-symbols-box{position:absolute;top:10px;right:10px;z-index:10001;background:rgba(255,255,255,.98);border:1px solid #e5e7eb;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.2);padding:8px 10px;font-size:11px;color:#111827}
+.map-symbols-row{display:flex;align-items:center;gap:8px;margin-top:6px}
+.map-symbol-dot{width:10px;height:10px;border-radius:999px;background:#ef4444;border:2px solid #dc2626;flex:0 0 auto}
+.map-symbol-line{width:20px;height:4px;background:#2563eb;border-radius:2px;flex:0 0 auto}
+.leaflet-container{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+
+/* Map Info Panel */
+.map-info-panel{position:absolute;top:10px;left:10px;right:auto;bottom:10px;z-index:10000;background:rgba(255,255,255,.98);border-radius:6px;padding:12px;width:420px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.2);border:1px solid #e5e7eb;display:block;transform:translateX(calc(-100% - 20px));opacity:0;pointer-events:none;transition:transform 160ms ease,opacity 160ms ease}
+.map-info-panel.active{transform:translateX(0);opacity:1;pointer-events:auto}
+.map-info-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #e5e7eb}
+.map-info-title{font-size:13px;font-weight:600;color:#111827;flex:1;text-align:center}
+.map-info-chevron,.map-info-close{background:none;border:none;font-size:18px;cursor:pointer;color:#6b7280;padding:0;width:24px;height:24px;display:flex;align-items:center;justify-content:center}
+.map-info-chevron:hover,.map-info-close:hover{background:#f3f4f6;border-radius:4px}
+.map-info-item{margin:6px 0;display:flex;justify-content:space-between}
+.map-info-label{font-size:11px;color:#4b5563;font-weight:500}
+.map-info-value{font-size:11px;font-weight:600;color:#111827;text-align:right;max-width:200px;word-break:break-word}
+.map-info-section{margin:10px 0;padding:8px 0;border-top:1px solid #e5e7eb}
+.map-info-section-title{font-size:11px;font-weight:600;color:#374151;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+.map-info-gps-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-bottom:8px}
+.gps-value-box{background:#f9fafb;border-radius:4px;padding:6px 8px;border:1px solid #e5e7eb}
+.gps-value-label{font-size:10px;color:#6b7280;margin-bottom:2px}
+.gps-value{font-size:12px;font-weight:600;color:#111827}
+
+/* Modal */
+.modal-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.7);display:none;align-items:center;justify-content:center;z-index:9999}
+.modal-backdrop.active{display:flex}
+.modal-content{background:#fff;border-radius:8px;padding:12px;width:96%;height:92%;display:flex;flex-direction:column}
+.modal-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #e5e7eb}
+.modal-header button{border:none;background:transparent;cursor:pointer;font-size:20px;color:#6b7280;padding:0 8px}
+.modal-header button:hover{color:#111827}
+.modal-title{font-size:14px;font-weight:600}
+.modal-plot{flex:1;min-height:0}
+
+footer{grid-row:5/6;grid-column:1/-1;font-size:10px;padding:4px 8px;color:#9ca3af;background:#f9fafb;border-top:1px solid #e5e7eb;text-align:center}
+.pill-btn{border-radius:3px}
+
+/* KPI styles */
+.kpi-summary-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 0 8px}
+.kpi-summary-title{font-weight:600;font-size:14px}
+.kpi-summary-subtitle{font-size:11px;color:#6b7280;margin-top:2px}
+.kpi-print-btn{padding:5px 10px;font-size:11px;border-radius:6px;border:1px solid #d1d5db;background:#fff;cursor:pointer;white-space:nowrap}
+.kpi-print-btn:hover{background:#f9fafb}
+.kpi-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:6px;margin-bottom:12px}
+@media(max-width:1100px){.kpi-cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){.kpi-cards{grid-template-columns:1fr}}
+.kpi-card{border:1px solid #e5e7eb;border-radius:10px;padding:10px 10px 8px;background:#fff}
+.kpi-label{font-size:12px;color:#374151;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.kpi-value{margin-top:6px;font-size:24px;font-weight:700;letter-spacing:-.2px}
+.kpi-unit{font-size:12px;color:#6b7280;margin-left:4px;font-weight:500}
+.kpi-badge{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid #e5e7eb;color:#111827;background:#f9fafb;white-space:nowrap}
+.kpi-badge.good{border-color:#bbf7d0;background:#dcfce7;color:#166534}
+.kpi-badge.warn{border-color:#fde68a;background:#fef3c7;color:#92400e}
+.kpi-badge.bad{border-color:#fecaca;background:#fee2e2;color:#991b1b}
+.kpi-notes{margin-top:6px;font-size:11px;color:#6b7280;min-height:14px}
+.kpi-table{width:100%;border-collapse:collapse;margin-top:6px;font-size:12px}
+.kpi-table th,.kpi-table td{border-bottom:1px solid #e5e7eb;padding:8px;vertical-align:top;text-align:left}
+.kpi-table th{font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:.04em;background:#f9fafb;position:sticky;top:0;z-index:1}
+.kpi-table td .kpi-badge{display:inline-block;transform:translateY(-1px)}
+.kpi-table-wrap{max-height:360px;overflow:auto;border:1px solid #e5e7eb;border-radius:10px}
+
+/* Responsive */
+@media(max-width:1200px){.charts-grid{grid-template-columns:1fr}.map-info-panel{width:340px}}
+@media(max-width:768px){.header-filters{flex-direction:column;align-items:flex-end;gap:8px}.map-info-panel{width:300px;max-height:80vh}}
+  </style>
+</head>
+<body>
+
+<!-- ======================================================================
+     UPLOAD SCREEN
+     ====================================================================== -->
+<div id="uploadScreen">
+  <div class="upload-bg-map" id="uploadBgMap"></div>
+  <div class="upload-content">
+    <div class="upload-logo">Harvester Performance Analyser</div>
+    <div class="upload-tagline">Upload combine telemetry data to visualise GPS tracks, engine metrics, harvest KPIs and more — entirely in your browser.</div>
+    <div class="upload-dropzone" id="dropzone">
+      <div class="upload-dropzone-icon">&#128190;</div>
+      <div class="upload-dropzone-text">Drag &amp; drop your telemetry file here</div>
+      <div class="upload-dropzone-hint">or click to browse</div>
+      <button class="upload-btn" id="browseBtn" type="button">Select File</button>
+    </div>
+    <div class="upload-formats">Supported formats: <strong>.json</strong> &nbsp; <strong>.jsonl</strong> &nbsp; (JSON Lines or JSON Array)</div>
+  </div>
+  <input type="file" id="fileInput" accept=".json,.jsonl,.txt" />
+</div>
+
+<!-- ======================================================================
+     PROCESSING OVERLAY
+     ====================================================================== -->
+<div id="processingOverlay">
+  <div class="spinner"></div>
+  <div class="processing-text" id="processingText">Processing your data…</div>
+  <div class="processing-detail" id="processingDetail">Parsing records</div>
+</div>
+
+<!-- ======================================================================
+     DASHBOARD (hidden until data is loaded)
+     ====================================================================== -->
+<div id="dashboard" class="page" style="display:none">
+  <header>
+    <div class="header-left">
+      <div class="machine-title" id="machineTitle">Combine Telemetry</div>
+      <div class="machine-meta" id="machineMeta"></div>
+    </div>
+    <div class="header-right">
+      <div class="machine-meta" id="machineDateRange"></div>
+      <div class="header-filters">
+        <div class="date-range-block">
+          <label for="startInput">Start</label>
+          <input type="datetime-local" id="startInput">
+          <label for="endInput">End</label>
+          <input type="datetime-local" id="endInput">
+          <button id="applyRangeBtn">Apply</button>
+        </div>
+        <div class="param-dropdown">
+          <button id="paramDropdownToggle" class="pill-btn">Custom parameters <span class="badge-count" id="paramCountBadge">0</span></button>
+          <div class="param-menu" id="paramMenu"></div>
+        </div>
+        <button id="buildCustomChartBtn" class="pill-btn" style="padding:4px 10px;font-size:11px;border-radius:3px;border:1px solid #111827;background:#111827;color:#fff;cursor:pointer;font-weight:500;">Create custom chart</button>
+        <button id="loadNewFileBtn">Load New File</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="group-tabs" id="groupTabs"></div>
+  <div class="subgroup-row" id="subgroupRow"></div>
+
+  <main class="content">
+    <div class="charts-grid" id="chartsGrid"></div>
+  </main>
+
+  <div class="map-info-panel" id="mapInfoPanel">
+    <div class="map-info-header">
+      <button class="map-info-chevron" id="mapInfoChevron" title="Collapse">&lsaquo;</button>
+      <div class="map-info-title">GPS Point Details</div>
+      <button class="map-info-close" id="mapInfoClose">&times;</button>
+    </div>
+    <div id="mapInfoContent"></div>
+  </div>
+
+  <footer>Harvester Performance Analyser — Client-side telemetry dashboard</footer>
+</div>
+
+<!-- ======================================================================
+     FOCUS / CUSTOM CHART MODAL
+     ====================================================================== -->
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal-content">
+    <div class="modal-header">
+      <div class="modal-title" id="modalTitle"></div>
+      <button id="modalCloseBtn" title="Close">&times;</button>
+    </div>
+    <div class="modal-plot" id="modalPlot"></div>
+  </div>
+</div>
+
+<!-- ======================================================================
+     APPLICATION JAVASCRIPT
+     ====================================================================== -->
+<script>
+/* ========================================================================
+   CONFIGURATION & CONSTANTS
+   ======================================================================== */
+
+const HEADING_PARAMS = ["GPS_DIR","Heading","Direction"];
+const SPEED_PARAMS = ["GPS_SPEED","Ground Speed"];
+const ALTITUDE_PARAMS = ["GPS_ALT","Altitude","GPS_ALTITUDE"];
+const FIX_PARAMS = ["GPS_FIX","Fix"];
+const SATELLITE_PARAMS = ["GPS_SAT","Satellites"];
+const PDOP_PARAMS = ["GPS_PDOP","PDOP"];
+const CORRECTION_PARAMS = ["Correction Type","RTK Correction Source"];
+
+const GROUP_CONFIG = {
+  machine_status_gps: {
+    label: "Machine Status & GPS",
+    subgroups: {
+      gps_position: {
+        label: "GPS / Position",
+        params: ["Latitude","Longitude","Raw Latitude","Raw Longitude","GPS_SPEED","GPS_ALT","GPS_DIR","GPS_CURRENT","GPS_FIX","GPS_SAT","GPS_PDOP","Combine Lat Tilt","Combine Long. Incl.","Correction Type","Altitude","Heading","RTK Correction Source"],
+        is_map: true
+      },
+      connectivity: {
+        label: "Connectivity / Network",
+        params: ["NETWORK_STATUS","NETWORK_RSSI","NETWORK_CONNECTION","NETWORK_ACTIVE_CONNECTION","NETWORK_ACTIVE_CONNECTION_STATUS","NETWORK_BYOC_ACTIVE","NETWORK_MCC","NETWORK_MNC","NETWORK_OPERATOR_NAME"]
+      },
+      duty_cycle: {
+        label: "Work Mode / Duty Cycle",
+        params: ["STATUS_DUTY","STATUS_DUTY_DESCRIPTION","STATUS_DUTY_CODE","STATUS_DEVICE","Work State","Driving Direction","Travel Direction","Gear selected","Average Fuel Economy in Work","Fuel Used in Work","Fuel Used in Field Mode","Fuel Used on Road","Fuel Used in Road Mode","Harvest Mode","GSS_FIELD"]
+      }
+    }
+  },
+  engine_powertrain: {
+    label: "Engine & Driveline",
+    subgroups: {
+      engine_core: {
+        label: "Engine Core",
+        params: ["Engine Speed","Engine Load","Engine hours","Engine Fuel Rate","Fuel Temperature","Engine Boost Pressure","Barometric Pressure","Battery Voltage","Fuel Tank Level","Fuel Level","Fuel per Area in Work - Average","Fuel per Distance - Average"]
+      },
+      temperatures: {
+        label: "Temperatures",
+        params: ["Engine Coolant Temperature","Engine Oil Temperature","Hydraulic Oil Temperature","Hydraulic Reservoir Temp","Hydro Mtr Temp","Intake Manifold Temperature","Engine Intake Air Temperature","Cooling Temperature","Traction Gearbox Temperature"]
+      },
+      pressures: {
+        label: "Pressures",
+        params: ["Engine Oil Pressure","Hydraulic Pump Pressure","Hydraulic Pressure","Ground Drive FWD Pressure","Ground Drive REV Pressure","Gnd Drive FWD Press","Gnd Drive REV Press"]
+      },
+      driveline: {
+        label: "Driveline & Transmission",
+        params: ["Ground Speed","Ground Drive Mode","Gear selected","Slip Angle","Traction Balance","Auto Steering Status"]
+      }
+    }
+  },
+  harvest_performance: {
+    label: "Harvest Performance",
+    subgroups: {
+      yield_flow: {
+        label: "Yield & Flow",
+        params: ["Dry Flow - Average","Flow - Wet","Dry Yield - Average","Wet Yield - Average","Wet Yield - Instant","Dry Weight","Harvest Mode","Broken Grain","MOG"]
+      },
+      mechanisms: {
+        label: "Harvest Mechanisms",
+        params: ["Fan Speed","Rotor / Drum Speed","Rotor/Drum Speed","Elevator Speed","Feeder Speed","Feeder Position","Feeder Status","Straw Chopper Speed","Chopper Speed","Seed Mill Speed","Vane Position","Left Rotor Vane Position","Right Rotor Vane Position","Multi-Thresh Opening","Threshing Hours","Harvesting Hours","Rotor / Drum Hours","Threshing Status","Thresher Status","Automation Status"]
+      },
+      loss_quality: {
+        label: "Loss & Quality",
+        params: ["Rotor Loss - Average","Rotor / Walker Loss Left","Rotor / Walker Loss Right","Sieve Loss - Average","Sieve Loss","Tailings / Returns Volume - Average","Returns Volume","Moisture - Average","Moisture - Instant"]
+      },
+      coverage_area: {
+        label: "Coverage & Area",
+        params: ["Coverage Area","Area","Area Remaining","Work Rate - Average","Working Width"]
+      }
+    }
+  },
+  settings_automation: {
+    label: "Settings & Automation",
+    subgroups: {
+      header_feeder: {
+        label: "Header / Feeder",
+        params: ["Header Height Control Mode","Concave Opening","Concave Opening / Clearance","Reel Speed","Auto Reel Status","Auto Crop Settings Status","Cradle Status","Unload Cradle Status","Guidance Engaged State","Pre Sieve"]
+      },
+      sieves: {
+        label: "Sieve Settings",
+        params: ["Front Lower Sieve Position","Front Upper Sieve Position","Rear Lower Sieve Position","Rear Upper Sieve Position","Upper Sieve","Lower Sieve","Sieve Loss - Average","Sieve Loss","Vane Position"]
+      },
+      spreader_chopper: {
+        label: "Spreader & Chopper",
+        params: ["Spreader Speed Left","Spreader Speed Right","Spreader Distribution Position","Straw Chopper Speed","Chopper Speed","Swath Door Mode"]
+      },
+      unloading: {
+        label: "Unloading & Misc",
+        params: ["Unloading Auger Status","Grainbin Level","Grain Tank Level","Operator Name","Work State","Serial Port1 InUse","Serial Port2 InUse","Receiver Software Version","Receiver Hardware Version","Receiver Serial Number","Receiver Connection Status","Farm Name","Field Name","Grower Name","Crop","Task Name","Task ID"]
+      }
+    }
+  },
+  reports_kpis: {
+    label: "Reports & KPIs",
+    subgroups: {
+      kpi_summary: {
+        label: "KPI Summary",
+        is_kpi_summary: true,
+        params: []
+      }
+    }
+  }
+};
+
+const CORE_ALIASES = {
+  "area":["coverage area"],"coverage area":["area"],
+  "fuel used in field mode":["fuel used in work","fuel used in field"],"fuel used in work":["fuel used in field mode","fuel used in field"],
+  "fuel used in road mode":["fuel used on road","fuel used in road"],"fuel used on road":["fuel used in road mode","fuel used in road"],
+  "fuel tank level":["fuel level"],"fuel level":["fuel tank level"],
+  "harvesting hours":["threshing hours"],"threshing hours":["harvesting hours"],
+  "rotor drum hours":["threshing hours","rotor drum hrs"],"engine hours":["engine hour","enginehours"],
+  "engine hours total":["engine hours"],"rotor drum hours total":["rotor drum hours"],
+  "rotor drum speed":["rotor speed"],"rotor speed":["rotor drum speed"],
+  "engine speed":["engine rpm"],"ground speed":["gps speed","groundspeed","vehicle speed"],
+  "feeder speed":["feederhouse speed","feeder rpm"],"fan speed":["cleaning fan speed","fan rpm"],
+  "chopper speed":["straw chopper speed"],"straw chopper speed":["chopper speed"],
+  "dry flow average":["dry flow","grain flow","dry flow instant"],"flow wet":["wet yield instant"],"wet yield instant":["flow wet"],
+  "working width":["cut width","header width","swath width"],
+  "grain tank level":["grainbin level"],"grainbin level":["grain tank level"],
+  "network active connection":["network active connection status"],"network active connection status":["network active connection"],
+  "concave opening":["concave opening clearance"],"concave opening clearance":["concave opening"],
+  "ground drive fwd pressure":["gnd drive fwd press"],"gnd drive fwd press":["ground drive fwd pressure"],
+  "ground drive rev pressure":["gnd drive rev press"],"gnd drive rev press":["ground drive rev pressure"],
+  "hydraulic oil temperature":["hydraulic reservoir temp"],"hydraulic reservoir temp":["hydraulic oil temperature"],
+  "threshing status":["thresher status"],"thresher status":["threshing status"],
+  "vane position":["left rotor vane position","right rotor vane position"],
+  "tailings returns volume average":["returns volume"],"returns volume":["tailings returns volume average"],
+  "sieve loss average":["sieve loss"],"sieve loss":["sieve loss average"],
+  "cradle status":["unload cradle status"],"unload cradle status":["cradle status"]
+};
+
+/* ========================================================================
+   STATE VARIABLES
+   ======================================================================== */
+let MACHINE_INFO = {};
+let GPS_EVENTS = [];
+let ALL_PARAMETERS = [];
+let currentGroupId = Object.keys(GROUP_CONFIG)[0];
+let currentSubgroupId = Object.keys(GROUP_CONFIG[currentGroupId].subgroups)[0];
+let currentStart = new Date();
+let currentEnd = new Date();
+let seriesByParam = new Map();
+let selectedCustomParams = new Set();
+let map = null;
+let pathLayer = null;
+let markersLayer = null;
+let activeMarker = null;
+let mapResizeHandler = null;
+let mapDisplayEvents = [];
+let mapInfoPinned = false;
+let mapMarkerBaseStyle = null;
+let mapMarkerHoverStyle = null;
+let mapMarkerActiveStyle = null;
+let mapInfoPanelHome = null;
+let _paramKeyIndex = new Map();
+let uploadedFileName = "";
+
+/* ========================================================================
+   UPLOAD SCREEN — Background Map
+   ======================================================================== */
+(function initUploadBgMap() {
+  const el = document.getElementById("uploadBgMap");
+  if (!el) return;
+  const bgMap = L.map(el, { zoomControl: false, attributionControl: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false, keyboard: false });
+  bgMap.setView([-25.2744, 133.7751], 4);
+  L.tileLayer("https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", { maxZoom: 20 }).addTo(bgMap);
+})();
+
+/* ========================================================================
+   FILE UPLOAD HANDLING
+   ======================================================================== */
+(function wireUpload() {
+  const dropzone = document.getElementById("dropzone");
+  const fileInput = document.getElementById("fileInput");
+  const browseBtn = document.getElementById("browseBtn");
+
+  browseBtn.addEventListener("click", (e) => { e.stopPropagation(); fileInput.click(); });
+  dropzone.addEventListener("click", () => fileInput.click());
+  dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("dragover"); });
+  dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
+  dropzone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("dragover");
+    if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener("change", () => { if (fileInput.files.length) handleFile(fileInput.files[0]); });
+})();
+
+async function handleFile(file) {
+  uploadedFileName = file.name;
+  showProcessing("Reading file…", `${file.name} (${(file.size / 1048576).toFixed(1)} MB)`);
+
+  try {
+    const text = await readFileText(file);
+    updateProcessing("Parsing records…", "This may take a moment for large files");
+    await yieldUI();
+
+    const records = await parseRecords(text);
+    if (!records.length) throw new Error("No valid records found in the file.");
+
+    updateProcessing("Indexing data…", `${records.length.toLocaleString()} records`);
+    await yieldUI();
+
+    processData(records);
+
+    updateProcessing("Building dashboard…", "Almost there");
+    await yieldUI();
+
+    initDashboard();
+    hideProcessing();
+    document.getElementById("uploadScreen").classList.add("hidden");
+    document.getElementById("dashboard").style.display = "";
+  } catch (err) {
+    hideProcessing();
+    alert("Error processing file: " + err.message);
+    console.error(err);
+  }
+}
+
+function readFileText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Failed to read file"));
+    reader.readAsText(file, "utf-8");
+  });
+}
+
+async function parseRecords(text) {
+  // Try JSON array first
+  const trimmed = text.trim();
+  if (trimmed.startsWith("[")) {
+    try {
+      const arr = JSON.parse(trimmed);
+      if (Array.isArray(arr)) return arr;
+    } catch (e) { /* fall through to line-by-line */ }
+  }
+
+  // JSONL / tab-delimited
+  const lines = text.split("\n");
+  const records = [];
+  const batchSize = 20000;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    if (line.startsWith("{")) {
+      try { records.push(JSON.parse(line)); } catch (e) { /* skip */ }
+    } else {
+      const parts = line.split("\t");
+      if (parts.length >= 10) {
+        const numVal = parts[4] ? parseFloat(parts[4]) : null;
+        const lat = parts[8] ? parseFloat(parts[8]) : null;
+        const lon = parts[9] ? parseFloat(parts[9]) : null;
+        records.push({
+          id: parts[0], nickname: parts[1], vin: parts[2],
+          name: parts[3],
+          numericValue: Number.isFinite(numVal) ? numVal : null,
+          stringValue: parts[5] || null,
+          uom: parts[6] || "",
+          eventTimestamp: parts[7],
+          lat: Number.isFinite(lat) ? lat : null,
+          lon: Number.isFinite(lon) ? lon : null
+        });
+      }
+    }
+
+    if (i % batchSize === 0 && i > 0) {
+      updateProcessing("Parsing records…", `${records.length.toLocaleString()} parsed so far`);
+      await yieldUI();
+    }
+  }
+  return records;
+}
+
+/* ========================================================================
+   DATA PROCESSING (client-side equivalent of Python build_html)
+   ======================================================================== */
+function processData(records) {
+  seriesByParam = new Map();
+  GPS_EVENTS = [];
+
+  // Extract machine info from first record
+  const first = records[0] || {};
+  const allTimestamps = [];
+
+  // Convert units helper
+  const convertUnitAndValue = (value, uom) => {
+    if (value == null) return { value, uom: uom || "" };
+    const unit = (uom || "").toString().trim().toUpperCase();
+    const n = Number(value);
+    if (!Number.isFinite(n)) return { value, uom: uom || "" };
+    if (unit === "KG/S" || unit === "KG/SEC" || unit === "KGS") return { value: n * 3.6, uom: "tonne/hour" };
+    if (unit === "KG/M2" || unit === "KG/M^2" || unit === "KG/M²") return { value: n * 10, uom: "tonne/hectare" };
+    return { value: n, uom: uom || "" };
+  };
+
+  // Index records into seriesByParam + collect GPS data
+  const gpsMap = new Map(); // timestamp string -> { lat, lon, params: [{param, value, uom}] }
+
+  for (const rec of records) {
+    const ts = rec.eventTimestamp;
+    if (!ts) continue;
+
+    const pName = rec.name;
+    let val = rec.numericValue;
+    const strVal = rec.stringValue;
+    const uom = rec.uom || "";
+
+    // Use string value as fallback for null numeric
+    if ((val == null || val === "" || (typeof val === "number" && !Number.isFinite(val))) && strVal != null && strVal !== "") {
+      const parsed = parseFloat(strVal);
+      if (Number.isFinite(parsed)) val = parsed;
+    }
+
+    const timeVal = new Date(ts);
+    if (isNaN(timeVal.getTime())) continue;
+    allTimestamps.push(timeVal);
+
+    if (pName && val != null) {
+      if (!seriesByParam.has(pName)) seriesByParam.set(pName, []);
+      const converted = convertUnitAndValue(val, uom);
+      seriesByParam.get(pName).push({ time: timeVal, value: converted.value, uom: converted.uom });
+    }
+
+    // Collect GPS data
+    const lat = rec.lat != null ? Number(rec.lat) : null;
+    const lon = rec.lon != null ? Number(rec.lon) : null;
+    const tsKey = ts;
+
+    if (!gpsMap.has(tsKey)) {
+      gpsMap.set(tsKey, { lat: null, lon: null, time: timeVal, params: [] });
+    }
+    const gpsEntry = gpsMap.get(tsKey);
+    if (lat != null && Number.isFinite(lat)) gpsEntry.lat = lat;
+    if (lon != null && Number.isFinite(lon)) gpsEntry.lon = lon;
+    if (pName && val != null) {
+      gpsEntry.params.push({ param: pName, value: val, uom: uom });
+    }
+  }
+
+  // Sort each series
+  for (const arr of seriesByParam.values()) {
+    arr.sort((a, b) => a.time - b.time);
+  }
+  _reindexParamKeys();
+
+  // Build GPS_EVENTS
+  const previewParams = new Set([...HEADING_PARAMS, ...SPEED_PARAMS, ...ALTITUDE_PARAMS, ...FIX_PARAMS, ...SATELLITE_PARAMS,
+    "Engine Speed", "Ground Speed", "Dry Flow - Average", "Wet Yield - Average", "Dry Yield - Average", "Moisture - Average"]);
+
+  for (const [tsKey, entry] of gpsMap) {
+    if (entry.lat == null || entry.lon == null) continue;
+    if (Math.abs(entry.lat) > 90 || Math.abs(entry.lon) > 180) continue;
+    if (entry.lat === 0 && entry.lon === 0) continue;
+
+    const gpsData = {};
+    const eventData = [];
+
+    for (const p of entry.params) {
+      const pn = p.param;
+      const pv = Number(p.value);
+      if (!Number.isFinite(pv)) continue;
+
+      if (!gpsData.heading && HEADING_PARAMS.includes(pn)) gpsData.heading = pv;
+      if (!gpsData.speed && SPEED_PARAMS.includes(pn)) gpsData.speed = pv;
+      if (!gpsData.altitude && ALTITUDE_PARAMS.includes(pn)) gpsData.altitude = pv;
+      if (gpsData.fix == null && FIX_PARAMS.includes(pn)) gpsData.fix = pv;
+      if (gpsData.sats == null && SATELLITE_PARAMS.includes(pn)) gpsData.sats = Math.round(pv);
+
+      if (previewParams.has(pn)) {
+        eventData.push({ param: pn, value: pv, uom: p.uom || "" });
+      }
+    }
+
+    GPS_EVENTS.push({
+      time: entry.time.toISOString(),
+      lat: entry.lat,
+      lon: entry.lon,
+      gps: gpsData,
+      data: eventData
+    });
+  }
+  GPS_EVENTS.sort((a, b) => a.time.localeCompare(b.time));
+
+  // Machine info
+  allTimestamps.sort((a, b) => a - b);
+  const startTs = allTimestamps.length ? allTimestamps[0] : new Date();
+  const endTs = allTimestamps.length ? allTimestamps[allTimestamps.length - 1] : new Date();
+
+  MACHINE_INFO = {
+    nickname: first.nickname || "",
+    vin: first.vin || "",
+    tz_offset_min: inferTzOffset(records),
+    start_ts: startTs.toISOString().replace("T", " ").substring(0, 19) + " UTC",
+    end_ts: endTs.toISOString().replace("T", " ").substring(0, 19) + " UTC"
+  };
+
+  currentStart = startTs;
+  currentEnd = endTs;
+
+  ALL_PARAMETERS = Array.from(seriesByParam.keys()).sort();
+
+  // Set date inputs
+  document.getElementById("startInput").value = startTs.toISOString().slice(0, 16);
+  document.getElementById("endInput").value = endTs.toISOString().slice(0, 16);
+}
+
+function inferTzOffset(records) {
+  for (let i = 0; i < Math.min(records.length, 250); i++) {
+    const ts = records[i].eventTimestamp || "";
+    const m = ts.match(/([+-])(\d{2}):(\d{2})/);
+    if (m) {
+      const sign = m[1] === "+" ? 1 : -1;
+      return sign * (parseInt(m[2]) * 60 + parseInt(m[3]));
+    }
+  }
+  return 0;
+}
+
+/* ========================================================================
+   DASHBOARD INITIALIZATION
+   ======================================================================== */
+function initDashboard() {
+  mapInfoPanelHome = document.getElementById("mapInfoPanel")?.parentElement || null;
+  hydrateMachineInfo();
+  buildGroupTabs();
+  buildSubgroupChips();
+  buildParamMenu();
+  wireFilters();
+  renderCurrentSubgroup();
+}
+
+function hydrateMachineInfo() {
+  const titleEl = document.getElementById("machineTitle");
+  const metaEl = document.getElementById("machineMeta");
+  const dateRangeEl = document.getElementById("machineDateRange");
+  let title = MACHINE_INFO.nickname || "Combine Telemetry";
+  titleEl.textContent = title;
+  const bits = [];
+  if (MACHINE_INFO.vin) bits.push("VIN: " + MACHINE_INFO.vin);
+  if (uploadedFileName) bits.push("File: " + uploadedFileName);
+  metaEl.textContent = bits.join(" • ");
+  dateRangeEl.textContent = MACHINE_INFO.start_ts + " → " + MACHINE_INFO.end_ts;
+}
+
+/* ========================================================================
+   UTILITY FUNCTIONS
+   ======================================================================== */
+function _lb(arr, targetTime) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid].time < targetTime) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+function _ub(arr, targetTime) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid].time <= targetTime) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+function _normParamName(s) {
+  return String(s || "").replace(/\u00a0/g, " ").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+function _reindexParamKeys() {
+  _paramKeyIndex = new Map();
+  for (const k of seriesByParam.keys()) {
+    const nk = _normParamName(k);
+    if (!_paramKeyIndex.has(nk)) _paramKeyIndex.set(nk, k);
+  }
+}
+function _candidateParamKeys(paramName) {
+  const out = []; const seen = new Set();
+  const push = (k) => { if (!k || seen.has(k)) return; if (seriesByParam.has(k)) { out.push(k); seen.add(k); } };
+  push(paramName);
+  const n = _normParamName(paramName);
+  const k0 = _paramKeyIndex.get(n);
+  if (k0) push(k0);
+  const aliases = CORE_ALIASES[n] || [];
+  for (const a of aliases) { const ka = _paramKeyIndex.get(a); if (ka) push(ka); }
+  for (const canon of Object.keys(CORE_ALIASES)) {
+    if (canon === n) continue;
+    const arr = CORE_ALIASES[canon] || [];
+    if (arr.includes(n)) { const kc = _paramKeyIndex.get(canon); if (kc) push(kc); }
+  }
+  return out;
+}
+function _getSeriesAny(paramName) {
+  const keys = _candidateParamKeys(paramName);
+  if (!keys.length) return [];
+  return seriesByParam.get(keys[0]) || [];
+}
+function _sliceSeriesForWindow(paramName, startTime, endTime, includePrev) {
+  const full = _getSeriesAny(paramName);
+  if (!full.length) return [];
+  let s = _lb(full, startTime);
+  if (includePrev && s > 0) s -= 1;
+  const e = _ub(full, endTime);
+  return full.slice(s, e);
+}
+function _overlapMs(a0, a1, b0, b1) { return Math.max(0, Math.min(a1, b1) - Math.max(a0, b0)); }
+function _fmt(n, digits) {
+  if (digits == null) digits = 3;
+  if (n == null || !Number.isFinite(n)) return "\u2014";
+  const abs = Math.abs(n);
+  if (abs >= 1000) return n.toFixed(Math.max(0, digits - 1));
+  return n.toFixed(digits);
+}
+function _badgeClass(level) {
+  if (level === "good") return "kpi-badge good";
+  if (level === "warn") return "kpi-badge warn";
+  return "kpi-badge bad";
+}
+
+/* ========================================================================
+   GROUP TABS & SUBGROUP CHIPS
+   ======================================================================== */
+function buildGroupTabs() {
+  const container = document.getElementById("groupTabs");
+  container.innerHTML = "";
+  for (const [gid, gcfg] of Object.entries(GROUP_CONFIG)) {
+    const tab = document.createElement("div");
+    tab.className = "group-tab" + (gid === currentGroupId ? " active" : "");
+    tab.textContent = gcfg.label;
+    tab.dataset.gid = gid;
+    tab.addEventListener("click", () => {
+      currentGroupId = gid;
+      currentSubgroupId = Object.keys(GROUP_CONFIG[gid].subgroups)[0];
+      buildGroupTabs();
+      buildSubgroupChips();
+      renderCurrentSubgroup();
+    });
+    container.appendChild(tab);
+  }
+}
+
+function buildSubgroupChips() {
+  const row = document.getElementById("subgroupRow");
+  row.innerHTML = "";
+  const gcfg = GROUP_CONFIG[currentGroupId];
+  for (const [sid, scfg] of Object.entries(gcfg.subgroups)) {
+    const chip = document.createElement("div");
+    chip.className = "subgroup-chip" + (sid === currentSubgroupId ? " active" : "");
+    chip.textContent = scfg.label;
+    chip.dataset.sid = sid;
+    chip.addEventListener("click", () => {
+      currentSubgroupId = sid;
+      buildSubgroupChips();
+      renderCurrentSubgroup();
+    });
+    row.appendChild(chip);
+  }
+}
+
+/* ========================================================================
+   PARAMETER DROPDOWN
+   ======================================================================== */
+function buildParamMenu() {
+  const menu = document.getElementById("paramMenu");
+  menu.innerHTML = "";
+  const added = new Set();
+  for (const [gid, gcfg] of Object.entries(GROUP_CONFIG)) {
+    const gTitle = document.createElement("div");
+    gTitle.className = "param-section-title";
+    gTitle.textContent = gcfg.label;
+    menu.appendChild(gTitle);
+    for (const [sid, scfg] of Object.entries(gcfg.subgroups)) {
+      const sTitle = document.createElement("div");
+      sTitle.className = "param-section-title";
+      sTitle.style.fontWeight = "500"; sTitle.style.fontSize = "10px"; sTitle.style.paddingLeft = "18px";
+      sTitle.textContent = "\u2022 " + scfg.label;
+      menu.appendChild(sTitle);
+      for (const paramName of scfg.params) {
+        if (added.has(paramName)) continue;
+        added.add(paramName);
+        const opt = document.createElement("div");
+        opt.className = "param-option";
+        opt.dataset.param = paramName;
+        const label = document.createElement("span"); label.textContent = paramName;
+        const tick = document.createElement("span"); tick.className = "tick"; tick.textContent = "\u2713";
+        opt.appendChild(label); opt.appendChild(tick);
+        opt.addEventListener("click", () => {
+          if (selectedCustomParams.has(paramName)) { selectedCustomParams.delete(paramName); opt.classList.remove("selected"); }
+          else { selectedCustomParams.add(paramName); opt.classList.add("selected"); }
+          updateParamDropdownLabel();
+        });
+        menu.appendChild(opt);
+      }
+    }
+    const divider = document.createElement("div"); divider.className = "param-divider"; menu.appendChild(divider);
+  }
+  const toggleBtn = document.getElementById("paramDropdownToggle");
+  toggleBtn.addEventListener("click", (e) => { e.stopPropagation(); menu.classList.toggle("open"); });
+  document.addEventListener("click", (e) => { if (!menu.contains(e.target) && e.target !== toggleBtn) menu.classList.remove("open"); });
+  updateParamDropdownLabel();
+}
+
+function updateParamDropdownLabel() {
+  document.getElementById("paramCountBadge").textContent = selectedCustomParams.size.toString();
+}
+
+/* ========================================================================
+   FILTERS / BUTTON WIRING
+   ======================================================================== */
+function wireFilters() {
+  document.getElementById("applyRangeBtn").addEventListener("click", () => {
+    const sVal = document.getElementById("startInput").value;
+    const eVal = document.getElementById("endInput").value;
+    if (sVal) currentStart = new Date(sVal);
+    if (eVal) currentEnd = new Date(eVal);
+    renderCurrentSubgroup();
+  });
+  document.getElementById("buildCustomChartBtn").addEventListener("click", () => renderCustomChart(true));
+  document.getElementById("modalCloseBtn").addEventListener("click", closeModal);
+  document.getElementById("modalBackdrop").addEventListener("click", (e) => { if (e.target.id === "modalBackdrop") closeModal(); });
+  document.getElementById("mapInfoClose").addEventListener("click", () => {
+    mapInfoPinned = false;
+    document.getElementById("mapInfoPanel").classList.remove("active");
+    if (activeMarker && typeof activeMarker.setStyle === "function" && mapMarkerBaseStyle) activeMarker.setStyle(mapMarkerBaseStyle);
+    activeMarker = null;
+  });
+  document.getElementById("mapInfoChevron").addEventListener("click", () => {
+    mapInfoPinned = false;
+    document.getElementById("mapInfoPanel").classList.remove("active");
+    if (activeMarker && typeof activeMarker.setStyle === "function" && mapMarkerBaseStyle) activeMarker.setStyle(mapMarkerBaseStyle);
+    activeMarker = null;
+  });
+  document.getElementById("loadNewFileBtn").addEventListener("click", () => {
+    document.getElementById("dashboard").style.display = "none";
+    document.getElementById("uploadScreen").classList.remove("hidden");
+    teardownMap();
+    document.getElementById("fileInput").value = "";
+  });
+}
+
+/* ========================================================================
+   MAP TEARDOWN
+   ======================================================================== */
+function teardownMap() {
+  if (mapResizeHandler) { window.removeEventListener("resize", mapResizeHandler); mapResizeHandler = null; }
+  if (map && typeof map.remove === "function") map.remove();
+  map = null; pathLayer = null; markersLayer = null; activeMarker = null; mapInfoPinned = false;
+}
+
+/* ========================================================================
+   RENDER CURRENT SUBGROUP (Charts / Map / KPIs)
+   ======================================================================== */
+function renderCurrentSubgroup() {
+  const grid = document.getElementById("chartsGrid");
+  grid.innerHTML = "";
+  grid.classList.remove("map-mode");
+  const contentEl = document.querySelector("main.content");
+  if (contentEl) contentEl.classList.remove("map-mode");
+
+  const panel = document.getElementById("mapInfoPanel");
+  if (panel) panel.classList.remove("active");
+  if (mapInfoPanelHome && panel && panel.parentElement !== mapInfoPanelHome) mapInfoPanelHome.appendChild(panel);
+
+  const gcfg = GROUP_CONFIG[currentGroupId];
+  const scfg = gcfg.subgroups[currentSubgroupId];
+
+  if (scfg && scfg.is_kpi_summary) { renderKpiSummary(); return; }
+  if (scfg.is_map) { renderMapView(); return; }
+  teardownMap();
+
+  const isHarvestPerformance = currentGroupId === "harvest_performance";
+  const _renderedSeriesKeys = new Set();
+
+  for (const paramName of scfg.params) {
+    const fullSeriesCheck = _getSeriesAny(paramName);
+    if (!fullSeriesCheck || !fullSeriesCheck.length) continue;
+    const candidateKeys = _candidateParamKeys(paramName);
+    const resolvedKey = candidateKeys.length ? candidateKeys[0] : paramName;
+    if (_renderedSeriesKeys.has(resolvedKey)) continue;
+    _renderedSeriesKeys.add(resolvedKey);
+
+    const card = document.createElement("div"); card.className = "chart-card";
+    const header = document.createElement("div"); header.className = "chart-header";
+    const left = document.createElement("div");
+    const title = document.createElement("div"); title.className = "chart-title";
+    title.textContent = (resolvedKey !== paramName) ? `${paramName} (${resolvedKey})` : paramName;
+    const subtitle = document.createElement("div"); subtitle.className = "chart-subtitle";
+    subtitle.textContent = isHarvestPerformance ? "Bar chart in selected range" : "Value vs time";
+    left.appendChild(title); left.appendChild(subtitle);
+    const tools = document.createElement("div"); tools.className = "chart-tools";
+    const btn = document.createElement("button"); btn.innerHTML = "&#x26F6;"; btn.title = "Focus";
+    tools.appendChild(btn);
+    header.appendChild(left); header.appendChild(tools);
+    const plotDiv = document.createElement("div"); plotDiv.className = "chart-plot";
+    card.appendChild(header); card.appendChild(plotDiv); grid.appendChild(card);
+
+    const fullSeries = _getSeriesAny(paramName);
+    const startIdx = _lb(fullSeries, currentStart);
+    const endIdx = _ub(fullSeries, currentEnd);
+
+    if (endIdx <= startIdx) {
+      const empty = document.createElement("div"); empty.className = "chart-empty";
+      empty.textContent = "No data in selected range."; plotDiv.appendChild(empty);
+      btn.disabled = true; btn.style.opacity = 0.4; continue;
+    }
+
+    let x = [], y = [];
+    const uom = fullSeries[startIdx]?.uom || fullSeries[0]?.uom || "";
+
+    if (isHarvestPerformance) {
+      const n = endIdx - startIdx;
+      const maxBars = 240;
+      if (n <= 600) {
+        for (let i = startIdx; i < endIdx; i++) {
+          const v = Number(fullSeries[i].value);
+          if (!Number.isFinite(v)) continue;
+          x.push(fullSeries[i].time); y.push(v);
+        }
+        subtitle.textContent = uom ? "Unit: " + uom : "Bar chart in selected range";
+      } else {
+        const startMs = currentStart.getTime();
+        const endMs = currentEnd.getTime();
+        const binMs = Math.max(1, Math.floor((endMs - startMs) / maxBars));
+        const bins = new Map();
+        for (let i = startIdx; i < endIdx; i++) {
+          const t = fullSeries[i].time.getTime();
+          const v = Number(fullSeries[i].value);
+          if (!Number.isFinite(v)) continue;
+          const binIndex = Math.floor((t - startMs) / binMs);
+          const acc = bins.get(binIndex) || { sum: 0, count: 0 };
+          acc.sum += v; acc.count += 1; bins.set(binIndex, acc);
+        }
+        const keys = Array.from(bins.keys()).sort((a, b) => a - b);
+        for (const k of keys) {
+          const acc = bins.get(k);
+          if (!acc || !acc.count) continue;
+          x.push(new Date(startMs + k * binMs + binMs / 2)); y.push(acc.sum / acc.count);
+        }
+        const minutes = Math.max(1, Math.round(binMs / 60000));
+        subtitle.textContent = uom ? `Unit: ${uom} \u2022 Avg per ~${minutes} min bin` : `Avg per ~${minutes} min bin`;
+      }
+    } else {
+      for (let i = startIdx; i < endIdx; i++) { x.push(fullSeries[i].time); y.push(fullSeries[i].value); }
+    }
+    if (!isHarvestPerformance) subtitle.textContent = uom ? "Unit: " + uom : "Value vs time";
+
+    const trace = isHarvestPerformance
+      ? { type: "bar", x, y, name: paramName, marker: { color: "#2563eb" } }
+      : { x, y, mode: "lines", name: paramName, line: { shape: "hv" } };
+
+    Plotly.newPlot(plotDiv, [trace], {
+      margin: { l: 50, r: 20, t: 20, b: isHarvestPerformance ? 60 : 40 },
+      xaxis: { title: "Time" }, yaxis: { title: uom || "" },
+      showlegend: false, bargap: isHarvestPerformance ? 0.05 : undefined
+    }, { responsive: true });
+
+    btn.addEventListener("click", () => {
+      if (isHarvestPerformance) {
+        openModal(paramName, null, null, uom, [{ type: "bar", x, y, name: paramName, marker: { color: "#2563eb" } }]);
+      } else { openModal(paramName, x, y, uom); }
+    });
+  }
+}
+
+/* ========================================================================
+   MAP VIEW (GPS / Position tab)
+   ======================================================================== */
+function renderMapView() {
+  const contentEl = document.querySelector("main.content");
+  if (contentEl) contentEl.classList.add("map-mode");
+  const grid = document.getElementById("chartsGrid");
+  grid.classList.add("map-mode");
+  grid.innerHTML = "";
+  teardownMap();
+
+  const mapRoot = document.createElement("div"); mapRoot.className = "map-root";
+  const mapContainer = document.createElement("div"); mapContainer.id = "mapContainer";
+  mapRoot.appendChild(mapContainer);
+
+  const symbolsBox = document.createElement("div"); symbolsBox.className = "map-symbols-box";
+  symbolsBox.innerHTML = '<div style="font-weight:600">Symbols</div><div class="map-symbols-row"><div class="map-symbol-dot"></div><div>GPS point</div></div><div class="map-symbols-row"><div class="map-symbol-line"></div><div>Travel path</div></div>';
+  mapRoot.appendChild(symbolsBox);
+
+  const mapInfoPanel = document.getElementById("mapInfoPanel");
+  if (mapInfoPanel) { mapRoot.appendChild(mapInfoPanel); mapInfoPanel.classList.remove("active"); }
+  mapInfoPinned = false; activeMarker = null;
+  grid.appendChild(mapRoot);
+
+  // Filter GPS events by date range
+  const filteredEvents = GPS_EVENTS.filter(ev => {
+    const evTime = new Date(ev.time);
+    return evTime >= currentStart && evTime <= currentEnd;
+  });
+
+  // Validate + deduplicate
+  const validEvents = [];
+  for (const ev of filteredEvents) {
+    if (typeof ev.lat !== "number" || typeof ev.lon !== "number" || !Number.isFinite(ev.lat) || !Number.isFinite(ev.lon) || Math.abs(ev.lat) > 90 || Math.abs(ev.lon) > 180) continue;
+    if (ev.lat === 0 || ev.lon === 0) continue;
+    validEvents.push(ev);
+  }
+
+  const displayEvents = [];
+  let prevKey = null;
+  for (const ev of validEvents) {
+    const key = `${ev.lat.toFixed(6)},${ev.lon.toFixed(6)}`;
+    if (key === prevKey && displayEvents.length) {
+      const last = displayEvents[displayEvents.length - 1];
+      last.sampleCount += 1; last.timeLast = ev.time; last.time = ev.time; last.gps = ev.gps; last.data = ev.data;
+      continue;
+    }
+    displayEvents.push({ ...ev, coordKey: key, sampleCount: 1, timeFirst: ev.time, timeLast: ev.time });
+    prevKey = key;
+  }
+  mapDisplayEvents = displayEvents;
+
+  if (displayEvents.length === 0) {
+    mapContainer.innerHTML = '<div class="chart-empty">No valid GPS positions in selected date range.</div>';
+    return;
+  }
+
+  const centerLat = displayEvents.reduce((s, e) => s + e.lat, 0) / displayEvents.length;
+  const centerLon = displayEvents.reduce((s, e) => s + e.lon, 0) / displayEvents.length;
+
+  map = L.map("mapContainer", { preferCanvas: true, zoomControl: true }).setView([centerLat, centerLon], 15);
+
+  // Google Hybrid satellite tiles
+  const googleHybrid = L.tileLayer("https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", { maxZoom: 20, attribution: "&copy; Google Maps" });
+  const esriImagery = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri", maxZoom: 19 });
+  const esriLabels = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", { maxZoom: 19 });
+  const esriHybrid = L.layerGroup([esriImagery, esriLabels]);
+  const osm = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" });
+
+  googleHybrid.addTo(map);
+  L.control.layers({ "Google Satellite (Hybrid)": googleHybrid, "ESRI Satellite (Hybrid)": esriHybrid, "OpenStreetMap": osm }, null, { position: "topleft" }).addTo(map);
+  L.control.scale({ imperial: false }).addTo(map);
+
+  // Path polyline
+  const pathPoints = displayEvents.map(e => [e.lat, e.lon]);
+  pathLayer = L.polyline(pathPoints, { color: "#2563eb", weight: 4, opacity: 0.8, lineJoin: "round", lineCap: "round" }).addTo(map);
+
+  // Dot markers
+  markersLayer = L.layerGroup().addTo(map);
+  mapMarkerBaseStyle = { radius: 4, fillColor: "#ef4444", color: "#dc2626", weight: 1, opacity: 1, fillOpacity: 0.85 };
+  mapMarkerHoverStyle = { ...mapMarkerBaseStyle, radius: 5, fillOpacity: 0.95 };
+  mapMarkerActiveStyle = { ...mapMarkerBaseStyle, radius: 6, fillColor: "#f97316", color: "#ea580c", fillOpacity: 0.95 };
+  const canvasRenderer = L.canvas({ padding: 0.5 });
+
+  displayEvents.forEach((ev, idx) => {
+    const marker = L.circleMarker([ev.lat, ev.lon], { ...mapMarkerBaseStyle, renderer: canvasRenderer });
+    marker.on("mouseover", () => { if (marker !== activeMarker) marker.setStyle(mapMarkerHoverStyle); if (!mapInfoPinned) showMapInfoPanel(ev, idx, false); });
+    marker.on("mouseout", () => { if (marker !== activeMarker) marker.setStyle(mapMarkerBaseStyle); if (!mapInfoPinned) hideMapInfoPanel(); });
+    marker.on("click", () => {
+      mapInfoPinned = true; showMapInfoPanel(ev, idx, true);
+      if (activeMarker && activeMarker !== marker) activeMarker.setStyle(mapMarkerBaseStyle);
+      activeMarker = marker; marker.setStyle(mapMarkerActiveStyle);
+    });
+    markersLayer.addLayer(marker);
+  });
+
+  if (displayEvents.length > 1) map.fitBounds(pathLayer.getBounds(), { padding: [20, 20] });
+  else map.setView([displayEvents[0].lat, displayEvents[0].lon], 18);
+
+  if (mapResizeHandler) window.removeEventListener("resize", mapResizeHandler);
+  mapResizeHandler = () => { if (map) map.invalidateSize(); };
+  window.addEventListener("resize", mapResizeHandler, { passive: true });
+  setTimeout(() => map && map.invalidateSize(), 0);
+}
+
+function hideMapInfoPanel() {
+  const panel = document.getElementById("mapInfoPanel");
+  if (panel) panel.classList.remove("active");
+}
+
+function showMapInfoPanel(event, pointIndex, pinned) {
+  const panel = document.getElementById("mapInfoPanel");
+  const content = document.getElementById("mapInfoContent");
+  if (typeof pinned === "boolean") mapInfoPinned = pinned;
+  const eventTime = new Date(event.time);
+  const timeStr = eventTime.toLocaleString();
+  const gpsInfo = event.gps || {};
+
+  let gpsGridHTML = "";
+  if (Object.keys(gpsInfo).length > 0) {
+    gpsGridHTML = `<div class="map-info-section"><div class="map-info-section-title">GPS Information</div><div class="map-info-gps-grid">
+      ${gpsInfo.heading != null ? `<div class="gps-value-box"><div class="gps-value-label">Heading</div><div class="gps-value">${Number(gpsInfo.heading).toFixed(1)}&deg;</div></div>` : ""}
+      ${gpsInfo.speed != null ? `<div class="gps-value-box"><div class="gps-value-label">Speed</div><div class="gps-value">${Number(gpsInfo.speed).toFixed(1)} km/h</div></div>` : ""}
+      ${gpsInfo.altitude != null ? `<div class="gps-value-box"><div class="gps-value-label">Altitude</div><div class="gps-value">${Number(gpsInfo.altitude).toFixed(1)} m</div></div>` : ""}
+      ${gpsInfo.sats != null ? `<div class="gps-value-box"><div class="gps-value-label">Satellites</div><div class="gps-value">${gpsInfo.sats}</div></div>` : ""}
+      ${gpsInfo.fix != null ? `<div class="gps-value-box"><div class="gps-value-label">Fix Type</div><div class="gps-value">${gpsInfo.fix}</div></div>` : ""}
+    </div></div>`;
+  }
+
+  const positionHTML = `<div class="map-info-section"><div class="map-info-section-title">Position Information</div>
+    <div class="map-info-item"><span class="map-info-label">Point #</span><span class="map-info-value">${pointIndex + 1} of ${mapDisplayEvents.length}</span></div>
+    ${event.sampleCount > 1 ? `<div class="map-info-item"><span class="map-info-label">Samples merged</span><span class="map-info-value">${event.sampleCount}</span></div>
+    <div class="map-info-item"><span class="map-info-label">First sample</span><span class="map-info-value">${new Date(event.timeFirst).toLocaleString()}</span></div>
+    <div class="map-info-item"><span class="map-info-label">Last sample</span><span class="map-info-value">${new Date(event.timeLast).toLocaleString()}</span></div>` : ""}
+    <div class="map-info-item"><span class="map-info-label">Timestamp</span><span class="map-info-value">${timeStr}</span></div>
+    <div class="map-info-item"><span class="map-info-label">Latitude</span><span class="map-info-value">${event.lat.toFixed(6)}</span></div>
+    <div class="map-info-item"><span class="map-info-label">Longitude</span><span class="map-info-value">${event.lon.toFixed(6)}</span></div>
+  </div>`;
+
+  const categories = { "Machine Status": ["STATUS_","Work State","Driving Direction","Travel Direction","Gear selected"], "Engine": ["Engine","Fuel","Battery","Temperature","Pressure"], "Harvest": ["Flow","Yield","Moisture","Rotor","Sieve","Fan","Chopper","Feeder"], "Settings": ["Mode","Status","Position","Speed","Opening","Door"], "Other": [] };
+  let telemetryHTML = '<div class="map-info-section"><div class="map-info-section-title">Telemetry Data</div>';
+  const sortedData = (event.data || []).slice().sort((a, b) => a.param.localeCompare(b.param));
+
+  for (const [category, keywords] of Object.entries(categories)) {
+    const categoryItems = sortedData.filter(item => {
+      if (category === "Other") return !Object.values(categories).slice(0, -1).some(kl => kl.some(kw => item.param.includes(kw)));
+      return keywords.some(kw => item.param.includes(kw));
+    });
+    if (categoryItems.length > 0) {
+      telemetryHTML += `<div style="margin-top:8px"><strong style="font-size:11px;color:#4b5563">${category}</strong></div>`;
+      categoryItems.forEach(item => {
+        let dv = typeof item.value === "number" ? item.value.toFixed(2) : item.value;
+        if (item.uom) dv += " " + item.uom;
+        telemetryHTML += `<div class="map-info-item"><span class="map-info-label">${item.param}</span><span class="map-info-value">${dv}</span></div>`;
+      });
+    }
+  }
+  telemetryHTML += "</div>";
+
+  content.innerHTML = positionHTML + gpsGridHTML + telemetryHTML;
+  panel.classList.add("active");
+  content.scrollTop = 0;
+}
+
+/* ========================================================================
+   KPI COMPUTATION ENGINE
+   ======================================================================== */
+function _maxGapMinutes(series) {
+  if (!series || series.length < 2) return 0;
+  let maxMs = 0;
+  for (let i = 0; i < series.length - 1; i++) { const dt = series[i+1].time - series[i].time; if (dt > maxMs) maxMs = dt; }
+  return maxMs / 60000;
+}
+
+function _counterDelta(series, startTime, endTime, opts) {
+  opts = opts || {};
+  const eps = opts.eps ?? 1e-9;
+  const alpha = opts.alpha ?? 1.2;
+  const maxRate = opts.maxRate ?? null;
+  let total = 0, resets = 0, outliers = 0;
+  if (!series || series.length < 2) return { total, resets, outliers, points: (series||[]).length };
+  const startMs = startTime.getTime(), endMs = endTime.getTime();
+  for (let i = 0; i < series.length - 1; i++) {
+    const t0ms = series[i].time.getTime(), t1ms = series[i+1].time.getTime();
+    if (t1ms <= startMs || t0ms >= endMs) continue;
+    const segMs = t1ms - t0ms;
+    if (!(segMs > 0)) continue;
+    const v0 = Number(series[i].value), v1 = Number(series[i+1].value);
+    if (!Number.isFinite(v0) || !Number.isFinite(v1)) continue;
+    let dv = v1 - v0;
+    if (dv < -eps) { resets += 1; dv = Math.max(0, v1); }
+    else if (dv < 0) dv = 0;
+    if (maxRate != null) { const dtH = segMs / 3600000; const cap = alpha * maxRate * dtH; if (dv > cap) { outliers += 1; dv = 0; } }
+    const ovMs = _overlapMs(t0ms, t1ms, startMs, endMs);
+    if (ovMs <= 0) continue;
+    total += dv * (ovMs / segMs);
+  }
+  return { total, resets, outliers, points: series.length };
+}
+
+function _zohAverage(series, startTime, endTime) {
+  if (!series || series.length === 0) return { avg: null, points: 0 };
+  const startMs = startTime.getTime(), endMs = endTime.getTime();
+  let num = 0, den = 0;
+  for (let i = 0; i < series.length; i++) {
+    const t0 = series[i].time.getTime();
+    const t1 = (i < series.length - 1) ? series[i+1].time.getTime() : endMs;
+    if (t1 <= startMs || t0 >= endMs) continue;
+    const v = Number(series[i].value);
+    if (!Number.isFinite(v)) continue;
+    const ov = _overlapMs(t0, t1, startMs, endMs);
+    if (ov <= 0) continue;
+    num += v * ov; den += ov;
+  }
+  return { avg: den > 0 ? (num / den) : null, points: series.length };
+}
+
+function _valueAtOrBefore(series, t) {
+  if (!series || series.length === 0) return null;
+  const idx = _ub(series, t) - 1;
+  for (let j = idx; j >= 0; j--) { const v = Number(series[j].value); if (Number.isFinite(v)) return v; }
+  return null;
+}
+
+function _pickFirstSeriesName(candidates) {
+  for (const n of candidates) { const s = _getSeriesAny(n); if (s && s.length) return n; }
+  return candidates[0];
+}
+
+function _uniqueSortedTimesMs(msArr) {
+  msArr.sort((a, b) => a - b);
+  const out = []; let prev = null;
+  for (const t of msArr) { if (!Number.isFinite(t)) continue; if (prev == null || t !== prev) out.push(t); prev = t; }
+  return out;
+}
+
+function _zohSampleAt(series, t, staleMs) {
+  if (!series || !series.length) return { value: null, sampleMs: null, ageMs: Infinity, hadSample: false };
+  const idx = _ub(series, t) - 1;
+  for (let j = idx; j >= 0; j--) {
+    const v = Number(series[j].value); const tm = series[j].time.getTime();
+    if (!Number.isFinite(tm) || !Number.isFinite(v)) continue;
+    const age = t.getTime() - tm;
+    const fresh = (age < staleMs);
+    return { value: fresh ? v : null, sampleMs: tm, ageMs: age, hadSample: true };
+  }
+  return { value: null, sampleMs: null, ageMs: Infinity, hadSample: false };
+}
+
+function _guessDryFlowMin(flowSeries, cfg) {
+  const uom = (flowSeries && flowSeries.length ? (flowSeries[0].uom || "") : "").toLowerCase();
+  if (uom.includes("kg/s") || uom.includes("kgs")) return cfg.harvest.dryFlowMinKgS;
+  return cfg.harvest.dryFlowMinTh;
+}
+
+function _defaultKpiCfg() {
+  return {
+    staleMs: 10 * 60 * 1000, engineOnRpm: 500, rotorOnRpm: 500,
+    harvest: { engineSpeedMinRpm: 1500, rotorDrumSpeedMinRpm: 500, dryFlowMinKgS: 0.1, dryFlowMinTh: 0.36, feederSpeedMinRpm: 200, fanSpeedMinRpm: 500, groundSpeedMinKmh: 0.5, workingWidthMinM: 1.0 },
+    road: { speedMinKmh: 2.0, widthMaxM: 0.3, dryFlowMaxTh: 0.20, dryFlowMaxKgS: 0.06 },
+    disagreeTolH: 0.25, disagreeWarnH: 0.17
+  };
+}
+
+function _addDayBoundaries(timesMs, startMs, endMs, tzOffsetMin) {
+  const dayMs = 24 * 60 * 60 * 1000;
+  const offMs = (Number(tzOffsetMin) || 0) * 60 * 1000;
+  const startLocal = startMs + offMs, endLocal = endMs + offMs;
+  const startDay = Math.floor(startLocal / dayMs) * dayMs;
+  for (let t = startDay + dayMs; t < endLocal; t += dayMs) {
+    const utc = t - offMs;
+    if (utc > startMs && utc < endMs) timesMs.push(utc);
+  }
+}
+
+function _buildStateTimeline(startTime, endTime, cfg, names) {
+  const startMs = startTime.getTime(), endMs = endTime.getTime(), staleMs = cfg.staleMs;
+  const tzOffsetMin = (MACHINE_INFO && MACHINE_INFO.tz_offset_min != null) ? MACHINE_INFO.tz_offset_min : 0;
+
+  const battSeries = _sliceSeriesForWindow("Battery Voltage", startTime, endTime, true);
+  const engSeries = _sliceSeriesForWindow(names.engineSpeed, startTime, endTime, true);
+  const rotSeries = _sliceSeriesForWindow(names.rotorSpeed, startTime, endTime, true);
+  const flowSeries = _sliceSeriesForWindow(names.dryFlow, startTime, endTime, true);
+  const feedSeries = _sliceSeriesForWindow(names.feederSpeed, startTime, endTime, true);
+  const fanSeries = _sliceSeriesForWindow(names.fanSpeed, startTime, endTime, true);
+  const spdSeries = _sliceSeriesForWindow(names.groundSpeed, startTime, endTime, true);
+  const widSeries = _sliceSeriesForWindow(names.workingWidth, startTime, endTime, true);
+
+  const keySeries = [
+    { key: "batteryV", series: battSeries }, { key: "engineSpeed", series: engSeries },
+    { key: "rotorSpeed", series: rotSeries }, { key: "dryFlow", series: flowSeries },
+    { key: "feederSpeed", series: feedSeries }, { key: "fanSpeed", series: fanSeries },
+    { key: "groundSpeed", series: spdSeries }, { key: "workingWidth", series: widSeries }
+  ];
+
+  const timesMs = [startMs, endMs];
+  for (const ks of keySeries) {
+    for (const p of (ks.series || [])) {
+      const tm = p.time.getTime();
+      if (!(tm >= startMs && tm <= endMs)) continue;
+      timesMs.push(tm); timesMs.push(Math.min(endMs, tm + staleMs));
+    }
+  }
+  _addDayBoundaries(timesMs, startMs, endMs, tzOffsetMin);
+
+  const uniq = _uniqueSortedTimesMs(timesMs);
+  if (uniq.length < 2) return {
+    segments: [], summary: { powerOnH: 0, engineOnH: 0, engineIdleH: 0, rotorOnH: 0, harvestOnH: 0, roadOnH: 0, unknownH: (endMs - startMs) / 3600000, roadDistanceKm: 0, maxUnknownRunMs: (endMs - startMs) },
+    meta: { hasAnyKey: false, keyCounts: {} }, names
+  };
+
+  const flowMin = _guessDryFlowMin(flowSeries, cfg);
+  const roadFlowMax = (flowMin <= 0.2 ? cfg.road.dryFlowMaxKgS : cfg.road.dryFlowMaxTh);
+
+  let powerOnMs = 0, engineOnMs = 0, engineIdleMs = 0, rotorOnMs = 0, harvestOnMs = 0, roadOnMs = 0, unknownMs = 0, maxUnknownRunMs = 0, curUnknownRunMs = 0, roadDistanceKm = 0;
+  const segments = [];
+  const keyCounts = {};
+  for (const ks of keySeries) keyCounts[ks.key] = (ks.series || []).length;
+  const hasAnyKey = Object.values(keyCounts).some(n => n > 0);
+
+  for (let i = 0; i < uniq.length - 1; i++) {
+    const t0ms = uniq[i], t1ms = uniq[i + 1];
+    if (t1ms <= startMs || t0ms >= endMs) continue;
+    const a0 = Math.max(t0ms, startMs), a1 = Math.min(t1ms, endMs), segMs = a1 - a0;
+    if (!(segMs > 0)) continue;
+    const t0 = new Date(a0);
+
+    const vals = {}, ages = {}, sampleMsMap = {};
+    let lastKeySampleMs = null;
+    for (const ks of keySeries) {
+      const s = _zohSampleAt(ks.series, t0, staleMs);
+      vals[ks.key] = s.value; ages[ks.key] = s.ageMs; sampleMsMap[ks.key] = s.sampleMs;
+      if (s.sampleMs != null) lastKeySampleMs = (lastKeySampleMs == null) ? s.sampleMs : Math.max(lastKeySampleMs, s.sampleMs);
+    }
+
+    const unknown = (lastKeySampleMs == null) ? true : ((a0 - lastKeySampleMs) >= staleMs);
+    const powerOn = !unknown;
+    const engineOn = (powerOn && vals.engineSpeed != null && vals.engineSpeed > cfg.engineOnRpm);
+    const engineIdle = (powerOn && !engineOn);
+    const rotorOn = (powerOn && vals.rotorSpeed != null && vals.rotorSpeed > cfg.rotorOnRpm);
+    const harvestKnown = (vals.engineSpeed != null && vals.rotorSpeed != null && vals.dryFlow != null && vals.fanSpeed != null && vals.groundSpeed != null);
+    const harvestOn = (powerOn && engineOn && harvestKnown && vals.engineSpeed > cfg.harvest.engineSpeedMinRpm && vals.rotorSpeed > cfg.harvest.rotorDrumSpeedMinRpm && vals.dryFlow > flowMin && (vals.feederSpeed == null || vals.feederSpeed > cfg.harvest.feederSpeedMinRpm) && vals.fanSpeed > cfg.harvest.fanSpeedMinRpm && vals.groundSpeed > cfg.harvest.groundSpeedMinKmh && (vals.workingWidth == null || vals.workingWidth > cfg.harvest.workingWidthMinM));
+    const roadKnown = (vals.groundSpeed != null && vals.dryFlow != null);
+    const roadOn = (powerOn && engineOn && roadKnown && vals.groundSpeed > cfg.road.speedMinKmh && (vals.workingWidth == null || vals.workingWidth <= cfg.road.widthMaxM) && vals.dryFlow <= roadFlowMax && !harvestOn);
+
+    segments.push({ t0: new Date(a0), t1: new Date(a1), ms: segMs, unknown, powerOn, engineOn, engineIdle, rotorOn, harvestOn, harvestKnown, roadOn, vals, ages, sampleMs: sampleMsMap, lastKeySampleMs });
+
+    if (unknown) { unknownMs += segMs; curUnknownRunMs += segMs; if (curUnknownRunMs > maxUnknownRunMs) maxUnknownRunMs = curUnknownRunMs; } else { curUnknownRunMs = 0; }
+    if (powerOn) powerOnMs += segMs;
+    if (engineOn) engineOnMs += segMs;
+    if (engineIdle) engineIdleMs += segMs;
+    if (rotorOn) rotorOnMs += segMs;
+    if (harvestOn) harvestOnMs += segMs;
+    if (roadOn) { roadOnMs += segMs; const spd = vals.groundSpeed; if (Number.isFinite(spd)) roadDistanceKm += spd * (segMs / 3600000); }
+  }
+
+  return {
+    segments, summary: { powerOnH: powerOnMs / 3600000, engineOnH: engineOnMs / 3600000, engineIdleH: engineIdleMs / 3600000, rotorOnH: rotorOnMs / 3600000, harvestOnH: harvestOnMs / 3600000, roadOnH: roadOnMs / 3600000, unknownH: unknownMs / 3600000, roadDistanceKm, maxUnknownRunMs },
+    meta: { hasAnyKey, keyCounts }, names
+  };
+}
+
+function _timelineSumMs(timeline, predFn) { let ms = 0; for (const seg of (timeline.segments || [])) { if (predFn(seg)) ms += seg.ms; } return ms; }
+function _timelineMaxRunMs(timeline, predFn) { let cur = 0, best = 0; for (const seg of (timeline.segments || [])) { if (predFn(seg)) { cur += seg.ms; if (cur > best) best = cur; } else { cur = 0; } } return best; }
+
+function _timelineWeightedAverage(series, timeline, predFn, opts) {
+  opts = opts || {};
+  const staleMs = opts.staleMs ?? null;
+  if (!series || !series.length || !timeline || !timeline.segments || !timeline.segments.length) return { avg: null, usedMs: 0, usedSegs: 0, points: (series || []).length };
+  let num = 0, den = 0, usedSegs = 0;
+  for (const seg of timeline.segments) {
+    if (!predFn(seg)) continue;
+    const s = (staleMs != null) ? _zohSampleAt(series, seg.t0, staleMs) : { value: _valueAtOrBefore(series, seg.t0) };
+    const v = Number(s.value);
+    if (!Number.isFinite(v)) continue;
+    num += v * seg.ms; den += seg.ms; usedSegs += 1;
+  }
+  return { avg: den > 0 ? (num / den) : null, usedMs: den, usedSegs, points: series.length };
+}
+
+function _activeMsBetween(a0ms, a1ms, timeline, predFn) {
+  let ms = 0;
+  if (!timeline || !timeline.segments) return 0;
+  for (const seg of timeline.segments) { const ov = _overlapMs(seg.t0.getTime(), seg.t1.getTime(), a0ms, a1ms); if (ov <= 0) continue; if (predFn(seg)) ms += ov; }
+  return ms;
+}
+
+function _estimateTickSize(series) {
+  if (!series || series.length < 3) return null;
+  const d = [];
+  for (let i = 0; i < series.length - 1; i++) { const v0 = Number(series[i].value), v1 = Number(series[i + 1].value); if (!Number.isFinite(v0) || !Number.isFinite(v1)) continue; const dv = v1 - v0; if (dv > 0) d.push(dv); }
+  if (d.length < 3) return null;
+  d.sort((a, b) => a - b);
+  const p = d[Math.max(0, Math.floor(d.length * 0.15))];
+  if (!Number.isFinite(p) || p <= 0) return null;
+  const snaps = [1.0, 0.5, 0.25, 0.2, 0.1, 0.05, 0.02, 0.01];
+  for (const s of snaps) { if (Math.abs(p - s) / s < 0.15) return s; }
+  return p;
+}
+
+function _snapToTickMultiple(dv, tick, tolFrac) {
+  tolFrac = tolFrac || 0.20;
+  if (!(Number.isFinite(dv) && Number.isFinite(tick) && tick > 0)) return { ok: false };
+  const n = Math.max(1, Math.round(dv / tick));
+  const snapped = n * tick;
+  const err = Math.abs(dv - snapped);
+  return { ok: (err <= (tick * tolFrac)), snapped, n, err };
+}
+
+function _counterDeltaReplayAware(series, startTime, endTime, opts) {
+  opts = opts || {};
+  const eps = opts.eps ?? 1e-9;
+  const maxRate = opts.maxRate ?? 100;
+  if (!series || series.length < 2) return { total: 0, resets: 0, replays: 0, outliers: 0, points: (series || []).length };
+  const startMs = startTime.getTime(), endMs = endTime.getTime();
+  let total = 0, resets = 0, replays = 0, outliers = 0;
+  let hwm = 0;
+  for (const p of series) { const v = Number(p.value); if (!Number.isFinite(v)) continue; const t = p.time.getTime(); if (t < startMs) { hwm = v; continue; } hwm = v; break; }
+
+  for (let i = 0; i < series.length - 1; i++) {
+    const t0ms = series[i].time.getTime(), t1ms = series[i + 1].time.getTime();
+    if (!(t1ms > t0ms)) continue;
+    if (t1ms <= startMs || t0ms >= endMs) continue;
+    const v0 = Number(series[i].value), v1 = Number(series[i + 1].value);
+    if (!Number.isFinite(v0) || !Number.isFinite(v1)) continue;
+    const dv = v1 - v0;
+    if (dv < -eps) { resets++; continue; }
+    if (!(dv > 0)) continue;
+    const dtH = (t1ms - t0ms) / 3600000;
+    const rate = dv / dtH;
+    const clipMs = Math.min(t1ms, endMs) - Math.max(t0ms, startMs);
+    const proFrac = clipMs / (t1ms - t0ms);
+    let credit;
+    if (rate > maxRate) {
+      const excess = Math.max(0, v1 - hwm);
+      const capCredit = maxRate * dtH;
+      credit = Math.min(excess, capCredit);
+      if (excess > capCredit) outliers++;
+      replays++;
+    } else { credit = dv; }
+    total += credit * proFrac;
+    hwm = Math.max(hwm, v1);
+  }
+  return { total, resets, replays, outliers, points: series.length };
+}
+
+function _counterDeltaStateAware(series, timeline, stateKey, opts) {
+  opts = opts || {};
+  const eps = opts.eps ?? 1e-9;
+  const alpha = opts.alpha ?? 1.2;
+  const maxRate = opts.maxRate ?? null;
+  const predFn = opts.predFn ?? ((seg) => !!seg[stateKey] && !seg.unknown);
+  const tickTolFrac = opts.tickTolFrac ?? 0.20;
+  const tick = (opts.tick === "auto") ? _estimateTickSize(series) : (opts.tick ?? null);
+  const replayRate = opts.replayRate ?? (maxRate != null ? maxRate * 5 : 500);
+  let total = 0, resets = 0, outliers = 0, acceptedTicks = 0, replays = 0;
+  if (!series || series.length < 2) return { total, resets, outliers, acceptedTicks, replays, points: (series || []).length };
+  const startMs = opts.startTime ? opts.startTime.getTime() : null;
+  const endMs = opts.endTime ? opts.endTime.getTime() : null;
+  let hwm = 0;
+  for (const p of series) { const v = Number(p.value); if (!Number.isFinite(v)) continue; const t = p.time.getTime(); if (startMs != null && t < startMs) { hwm = v; continue; } hwm = v; break; }
+
+  for (let i = 0; i < series.length - 1; i++) {
+    const t0ms = series[i].time.getTime(), t1ms = series[i + 1].time.getTime();
+    if (!(t1ms > t0ms)) continue;
+    if (startMs != null && t1ms <= startMs) continue;
+    if (endMs != null && t0ms >= endMs) continue;
+    const a0 = (startMs != null) ? Math.max(t0ms, startMs) : t0ms;
+    const a1 = (endMs != null) ? Math.min(t1ms, endMs) : t1ms;
+    const segMs = a1 - a0;
+    if (!(segMs > 0)) continue;
+    const v0 = Number(series[i].value), v1 = Number(series[i + 1].value);
+    if (!Number.isFinite(v0) || !Number.isFinite(v1)) continue;
+    let dv = v1 - v0;
+    if (dv < -eps) { resets += 1; continue; }
+    if (!(dv > 0)) continue;
+    const rawDtH = (t1ms - t0ms) / 3600000;
+    const rawRate = dv / rawDtH;
+    if (rawRate > replayRate) {
+      const excess = Math.max(0, v1 - hwm);
+      hwm = Math.max(hwm, v1);
+      if (excess <= eps) { replays++; continue; }
+      dv = excess; replays++;
+    } else { hwm = Math.max(hwm, v1); }
+    const activeMs = _activeMsBetween(a0, a1, timeline, predFn);
+    if (!(activeMs > 0)) continue;
+    if (maxRate != null) {
+      const dtHours = activeMs / 3600000;
+      const cap = alpha * maxRate * dtHours;
+      if (dv > cap) {
+        if (tick != null) {
+          const snap = _snapToTickMultiple(dv, tick, tickTolFrac);
+          if (snap.ok && snap.snapped <= (cap + tick)) { acceptedTicks += 1; dv = snap.snapped; }
+          else { outliers += 1; dv = 0; }
+        } else { outliers += 1; dv = 0; }
+      }
+    }
+    total += dv * (activeMs / segMs);
+  }
+  return { total, resets, outliers, acceptedTicks, replays, points: series.length };
+}
+
+function _qualityFromTimelineAndCounters(opts) {
+  const notes = [];
+  let level = "good", label = "Good";
+  if (!opts.hasData) return { level: "bad", label: "Missing", notes: "No sensor data" };
+  if (opts.valueOk === false) return { level: "bad", label: "Missing", notes: "Not enough data" };
+  if (opts.counterRes && opts.counterRes.points > 0 && opts.counterRes.points < 2) { level = "warn"; label = "Check"; notes.push("Sparse counter samples"); }
+  if (opts.counterRes) {
+    if (opts.counterRes.resets > 0) notes.push(`Counter resets: ${opts.counterRes.resets}`);
+    if (opts.counterRes.replays > 0) notes.push(`Replay jumps suppressed: ${opts.counterRes.replays}`);
+    if (opts.counterRes.outliers > 0) { level = "warn"; label = "Check"; notes.push("Counter outliers filtered"); }
+  }
+  if (opts.unknownRunMs != null && opts.unknownRunMs > (20 * 60 * 1000)) { level = "warn"; label = "Check"; notes.push(`Telemetry gaps (max ~${Math.round(opts.unknownRunMs / 60000)} min)`); }
+  if (opts.disagreeH != null && Math.abs(opts.disagreeH) >= (opts.disagreeTolH ?? 0.25)) { level = "warn"; label = "Check"; notes.push(`Counter vs state differs ~${Math.round(Math.abs(opts.disagreeH) * 60)} min`); }
+  if (opts.extraNotes) { if (Array.isArray(opts.extraNotes)) notes.push(...opts.extraNotes.filter(Boolean)); else notes.push(String(opts.extraNotes)); }
+  return { level, label, notes: notes.join(" \u2022 ") };
+}
+
+function _computeKpis(startTime, endTime) {
+  const cfg = _defaultKpiCfg();
+  const rotorSpeedName = _pickFirstSeriesName(["Rotor/Drum Speed", "Rotor / Drum Speed", "Rotor Speed", "Rotor"]);
+  const names = { engineSpeed: "Engine Speed", rotorSpeed: rotorSpeedName, dryFlow: "Dry Flow - Average", feederSpeed: "Feeder Speed", fanSpeed: "Fan Speed", groundSpeed: "Ground Speed", workingWidth: "Working Width" };
+  const timeline = _buildStateTimeline(startTime, endTime, cfg, names);
+
+  const engH = _sliceSeriesForWindow("Engine hours", startTime, endTime, true);
+  const rotH = _sliceSeriesForWindow("Rotor / Drum Hours", startTime, endTime, true);
+  const harvH = _sliceSeriesForWindow("Harvesting Hours", startTime, endTime, true);
+  const area = _sliceSeriesForWindow("Area", startTime, endTime, true);
+  const dryW = _sliceSeriesForWindow("Dry Weight", startTime, endTime, true);
+  const fuelField = _sliceSeriesForWindow("Fuel Used in Field Mode", startTime, endTime, true);
+  const fuelRoad = _sliceSeriesForWindow("Fuel Used in Road Mode", startTime, endTime, true);
+  const fuelRate = _sliceSeriesForWindow("Engine Fuel Rate", startTime, endTime, true);
+
+  let fuelRateMax = null;
+  if (fuelRate && fuelRate.length) { for (const p of fuelRate) { const v = Number(p.value); if (Number.isFinite(v)) fuelRateMax = fuelRateMax == null ? v : Math.max(fuelRateMax, v); } }
+  if (fuelRateMax == null) fuelRateMax = 200;
+  const fuelCap = Math.max(100, fuelRateMax * 1.5);
+
+  const engH_c = _counterDeltaStateAware(engH, timeline, "engineOn", { maxRate: 1.0, tick: "auto", startTime, endTime });
+  const rotH_c = _counterDeltaStateAware(rotH, timeline, "rotorOn", { maxRate: 1.0, tick: "auto", startTime, endTime });
+  const harvH_c = _counterDeltaStateAware(harvH, timeline, "harvestOn", { maxRate: 1.0, tick: "auto", startTime, endTime });
+  const area_c = _counterDeltaReplayAware(area, startTime, endTime, { maxRate: 100.0 });
+  const dryW_c = _counterDeltaReplayAware(dryW, startTime, endTime, { maxRate: 200.0 });
+  const fuelField_d = _counterDeltaReplayAware(fuelField, startTime, endTime, { maxRate: fuelCap });
+  const fuelRoad_d = _counterDeltaReplayAware(fuelRoad, startTime, endTime, { maxRate: fuelCap });
+
+  const { engineOnH, powerOnH, engineIdleH, rotorOnH, harvestOnH, roadOnH, unknownH } = timeline.summary;
+  const engineCounterH = (engH_c.points >= 2) ? engH_c.total : null;
+  const rotorCounterH = (rotH_c.points >= 2) ? rotH_c.total : null;
+  const harvestCounterH = (harvH_c.points >= 2) ? harvH_c.total : null;
+  const disagreeEngH = (engineCounterH != null) ? (engineCounterH - engineOnH) : null;
+  const disagreeRotH = (rotorCounterH != null) ? (rotorCounterH - rotorOnH) : null;
+  const disagreeHarvH = (harvestCounterH != null) ? (harvestCounterH - harvestOnH) : null;
+
+  let areaHa = (area_c.points >= 2) ? area_c.total : null;
+  let areaSource = "counter";
+  if (!(areaHa != null && Number.isFinite(areaHa) && areaHa > 0) && harvestOnH > 0) {
+    let proxy = 0;
+    for (const seg of timeline.segments) { if (!seg.harvestOn || seg.unknown) continue; const spd = Number(seg.vals.groundSpeed); const wid = Number(seg.vals.workingWidth); if (!Number.isFinite(spd) || !Number.isFinite(wid) || wid <= 0) continue; proxy += (spd * (seg.ms / 3600000) * wid / 10.0); }
+    if (proxy > 0) { areaHa = proxy; areaSource = "speed\u00d7width"; }
+  }
+
+  const haPerHour = (harvestOnH > 0 && areaHa > 0) ? (areaHa / harvestOnH) : null;
+  const haPerHourCounter = (harvestCounterH != null && harvestCounterH > 0 && areaHa > 0) ? (areaHa / harvestCounterH) : null;
+
+  const dryFlow = _sliceSeriesForWindow(names.dryFlow, startTime, endTime, true);
+  const dryFlowAvg = _timelineWeightedAverage(dryFlow, timeline, (seg) => seg.harvestOn && !seg.unknown, { staleMs: cfg.staleMs }).avg;
+
+  const dryYAvgSeries = _sliceSeriesForWindow("Dry Yield - Average", startTime, endTime, true);
+  let dryYieldSignal = null;
+  if (dryYAvgSeries && dryYAvgSeries.length) dryYieldSignal = _timelineWeightedAverage(dryYAvgSeries, timeline, (seg) => seg.harvestOn && !seg.unknown, { staleMs: cfg.staleMs }).avg;
+  const dryYieldFromWeight = (areaHa > 0 && (dryW_c.points >= 2)) ? (dryW_c.total / areaHa) : null;
+  const dryYield = (dryYieldSignal != null) ? dryYieldSignal : dryYieldFromWeight;
+  const dryYieldSource = (dryYieldSignal != null) ? "signal" : (dryYieldFromWeight != null ? "counter" : "missing");
+
+  const wetYAvgSeries = _sliceSeriesForWindow("Wet Yield - Average", startTime, endTime, true);
+  let wetYield = null;
+  if (wetYAvgSeries && wetYAvgSeries.length) wetYield = _timelineWeightedAverage(wetYAvgSeries, timeline, (seg) => seg.harvestOn && !seg.unknown, { staleMs: cfg.staleMs }).avg;
+
+  const moistAvgSeries = _sliceSeriesForWindow("Moisture - Average", startTime, endTime, true);
+  let moisture = null;
+  if (moistAvgSeries && moistAvgSeries.length) moisture = _timelineWeightedAverage(moistAvgSeries, timeline, (seg) => seg.harvestOn && !seg.unknown, { staleMs: cfg.staleMs }).avg;
+
+  let fuelFieldL = (fuelField_d.points >= 2) ? fuelField_d.total : null;
+  let fuelRoadL = (fuelRoad_d.points >= 2) ? fuelRoad_d.total : null;
+  let fuelSource = "counter";
+  if (fuelFieldL == null && fuelRoadL == null && fuelRate && fuelRate.length >= 2) {
+    let fieldL = 0, roadL = 0, usedSegs = 0;
+    for (const seg of timeline.segments) { if (seg.unknown || !seg.engineOn) continue; const s = _zohSampleAt(fuelRate, seg.t0, cfg.staleMs); const rate = Number(s.value); if (!Number.isFinite(rate) || rate < 0) continue; const hrs = seg.ms / 3600000; const litres = rate * hrs; if (seg.roadOn) roadL += litres; else fieldL += litres; usedSegs += 1; }
+    if (usedSegs > 0) { fuelFieldL = fieldL; fuelRoadL = roadL; fuelSource = "rate"; }
+  }
+  const fuelTotalL = (fuelFieldL != null || fuelRoadL != null) ? ((fuelFieldL || 0) + (fuelRoadL || 0)) : null;
+  const fuelPerHa = (areaHa > 0 && fuelFieldL != null) ? (fuelFieldL / areaHa) : null;
+  const roadDistanceKm = timeline.summary.roadDistanceKm;
+  const unknownRunMs = timeline.summary.maxUnknownRunMs;
+  const unknownRunHarvestMs = _timelineMaxRunMs(timeline, (seg) => (seg.engineOn && !seg.unknown && !seg.harvestKnown));
+
+  const q = {
+    powerOnH: { level: timeline.meta.hasAnyKey ? "ok" : "warn", label: timeline.meta.hasAnyKey ? "OK" : "Check", notes: "Power-on = receiving fresh telemetry" },
+    engineIdleH: { level: timeline.meta.hasAnyKey ? "ok" : "warn", label: timeline.meta.hasAnyKey ? "OK" : "Check", notes: "Key-on but engine RPM below threshold" },
+    engH: _qualityFromTimelineAndCounters({ hasData: timeline.meta.hasAnyKey && (timeline.meta.keyCounts.engineSpeed > 0), valueOk: true, unknownRunMs, disagreeH: disagreeEngH, disagreeTolH: cfg.disagreeTolH, counterRes: engH_c, extraNotes: (engineCounterH != null ? [`Counter ${_fmt(engineCounterH, 3)} hrs (\u0394 ${_fmt(disagreeEngH, 3)} hrs)`] : ["Counter missing"]) }),
+    rotH: _qualityFromTimelineAndCounters({ hasData: timeline.meta.hasAnyKey && (timeline.meta.keyCounts.rotorSpeed > 0), valueOk: true, unknownRunMs, disagreeH: disagreeRotH, disagreeTolH: cfg.disagreeTolH, counterRes: rotH_c, extraNotes: (rotorCounterH != null ? [`Counter ${_fmt(rotorCounterH, 3)} hrs (\u0394 ${_fmt(disagreeRotH, 3)} hrs)`] : ["Counter missing"]) }),
+    harvH: _qualityFromTimelineAndCounters({ hasData: timeline.meta.hasAnyKey, valueOk: true, unknownRunMs: Math.max(unknownRunMs, unknownRunHarvestMs), disagreeH: disagreeHarvH, disagreeTolH: cfg.disagreeTolH, counterRes: harvH_c, extraNotes: (harvestCounterH != null ? [`Counter ${_fmt(harvestCounterH, 3)} hrs (\u0394 ${_fmt(disagreeHarvH, 3)} hrs)`] : ["Counter missing"]) }),
+    area: _qualityFromTimelineAndCounters({ hasData: timeline.meta.hasAnyKey, valueOk: (areaHa != null && Number.isFinite(areaHa)), unknownRunMs, counterRes: area_c, extraNotes: [areaSource === "counter" ? "Area from counter (replay\u2011aware)" : "Area from speed\u00d7width proxy"] }),
+    dryFlow: _qualityFromTimelineAndCounters({ hasData: timeline.meta.hasAnyKey && (timeline.meta.keyCounts.dryFlow > 0), valueOk: (dryFlowAvg != null && Number.isFinite(dryFlowAvg)), unknownRunMs, extraNotes: (harvestOnH > 0 ? null : ["No harvest time in range"]) }),
+    wetYield: _qualityFromTimelineAndCounters({ hasData: (wetYield != null), valueOk: (wetYield != null && Number.isFinite(wetYield)), unknownRunMs, extraNotes: (wetYield != null ? ["From Wet Yield - Average"] : null) }),
+    dryYield: _qualityFromTimelineAndCounters({ hasData: (dryYield != null), valueOk: (dryYield != null && Number.isFinite(dryYield)), unknownRunMs, extraNotes: (dryYieldSource === "signal" ? ["From Dry Yield - Average"] : (dryYieldSource === "counter" ? ["Fallback: Dry Weight / Area"] : null)) }),
+    moisture: _qualityFromTimelineAndCounters({ hasData: (moisture != null), valueOk: (moisture != null && Number.isFinite(moisture)), unknownRunMs }),
+    fuelField: _qualityFromTimelineAndCounters({ hasData: (fuelFieldL != null), valueOk: (fuelFieldL != null), unknownRunMs, counterRes: (fuelSource === "counter" ? fuelField_d : null), extraNotes: (fuelSource === "rate" ? ["From Engine Fuel Rate integration"] : null) }),
+    fuelRoad: _qualityFromTimelineAndCounters({ hasData: (fuelRoadL != null), valueOk: (fuelRoadL != null), unknownRunMs, counterRes: (fuelSource === "counter" ? fuelRoad_d : null), extraNotes: (fuelSource === "rate" ? ["From Engine Fuel Rate integration"] : null) }),
+    fuelPerHa: _qualityFromTimelineAndCounters({ hasData: (fuelPerHa != null), valueOk: (fuelPerHa != null && Number.isFinite(fuelPerHa)), unknownRunMs, extraNotes: (fuelSource === "rate" ? ["Fuel from rate integration"] : null) }),
+    roadDistance: _qualityFromTimelineAndCounters({ hasData: timeline.meta.hasAnyKey && (timeline.meta.keyCounts.groundSpeed > 0), valueOk: (roadDistanceKm != null && Number.isFinite(roadDistanceKm)), unknownRunMs, extraNotes: (roadOnH > 0 ? [`Road hours ${_fmt(roadOnH, 3)} hrs`] : ["No road state in range"]) })
+  };
+
+  const notes = {
+    powerOnH: "Power-on = not-Unknown (fresh telemetry)",
+    engineIdleH: "Key-on but engine RPM below threshold",
+    engH: `State ${_fmt(engineOnH, 3)} hrs \u2022 Counter ${engineCounterH == null ? "\u2014" : _fmt(engineCounterH, 3) + " hrs"}`,
+    rotH: `State ${_fmt(rotorOnH, 3)} hrs \u2022 Counter ${rotorCounterH == null ? "\u2014" : _fmt(rotorCounterH, 3) + " hrs"}`,
+    harvH: `State ${_fmt(harvestOnH, 3)} hrs \u2022 Counter ${harvestCounterH == null ? "\u2014" : _fmt(harvestCounterH, 3) + " hrs"}`,
+    area: (areaSource === "counter" ? "" : "Area estimated from speed \u00d7 width (proxy)"),
+    haPerHour: (haPerHourCounter != null ? `Counter-based: ${_fmt(haPerHourCounter, 3)} ha/hr` : "")
+  };
+
+  return { timeline, values: { powerOnH, engineOnH, engineIdleH, rotorOnH, harvestOnH, roadOnH, unknownH, engineCounterH, rotorCounterH, harvestCounterH, areaHa, haPerHour, haPerHourCounter, dryFlowAvg, wetYield, dryYield, dryYieldFromWeight, dryYieldSource, moisture, fuelFieldL, fuelRoadL, fuelTotalL, fuelPerHa, fuelSource, roadDistanceKm }, delta: { engH_c, rotH_c, harvH_c, area_c, dryW_c, fuelField_d, fuelRoad_d }, quality: q, notes };
+}
+
+/* ========================================================================
+   KPI RENDERING
+   ======================================================================== */
+function _makeKpiCard(label, valueText, unitText, quality, notesText) {
+  const el = document.createElement("div"); el.className = "kpi-card";
+  const top = document.createElement("div"); top.className = "kpi-label";
+  const l = document.createElement("div"); l.textContent = label;
+  const badge = document.createElement("span"); badge.className = _badgeClass(quality.level); badge.textContent = quality.label;
+  top.appendChild(l); top.appendChild(badge);
+  const val = document.createElement("div"); val.className = "kpi-value"; val.textContent = valueText;
+  if (unitText) { const u = document.createElement("span"); u.className = "kpi-unit"; u.textContent = unitText; val.appendChild(u); }
+  const notesEl = document.createElement("div"); notesEl.className = "kpi-notes"; notesEl.textContent = notesText || quality.notes || "";
+  el.appendChild(top); el.appendChild(val); el.appendChild(notesEl);
+  return el;
+}
+
+function renderKpiSummary() {
+  const grid = document.getElementById("chartsGrid");
+  grid.innerHTML = ""; grid.classList.remove("map-mode");
+  const contentEl = document.querySelector("main.content");
+  if (contentEl) contentEl.classList.remove("map-mode");
+  teardownMap();
+
+  const card1 = document.createElement("div"); card1.className = "chart-card full-width";
+  const toolbar = document.createElement("div"); toolbar.className = "kpi-summary-toolbar";
+  const titleWrap = document.createElement("div");
+  const title = document.createElement("div"); title.className = "kpi-summary-title"; title.textContent = "KPI Summary";
+  const subtitle = document.createElement("div"); subtitle.className = "kpi-summary-subtitle"; subtitle.textContent = `${currentStart.toLocaleString()} \u2192 ${currentEnd.toLocaleString()}`;
+  titleWrap.appendChild(title); titleWrap.appendChild(subtitle);
+  const printBtn = document.createElement("button"); printBtn.className = "kpi-print-btn"; printBtn.textContent = "Print / Save as PDF"; printBtn.addEventListener("click", () => window.print());
+  toolbar.appendChild(titleWrap); toolbar.appendChild(printBtn);
+  card1.appendChild(toolbar);
+
+  const kpi = _computeKpis(currentStart, currentEnd);
+  const v = kpi.values, q = kpi.quality, n = kpi.notes;
+  const cards = document.createElement("div"); cards.className = "kpi-cards";
+
+  cards.appendChild(_makeKpiCard("Machine Power-On Hours", _fmt(v.powerOnH, 3), "hrs", q.powerOnH, n.powerOnH));
+  cards.appendChild(_makeKpiCard("Engine Running Hours", _fmt(v.engineOnH, 3), "hrs", q.engH, n.engH));
+  cards.appendChild(_makeKpiCard("Key-On (Engine Off)", _fmt(v.engineIdleH, 3), "hrs", q.engineIdleH, n.engineIdleH));
+  cards.appendChild(_makeKpiCard("Rotor/Drum Operating Hours", _fmt(v.rotorOnH, 3), "hrs", q.rotH, n.rotH));
+  cards.appendChild(_makeKpiCard("Harvesting Hours", _fmt(v.harvestOnH, 3), "hrs", q.harvH, `State ${_fmt(v.harvestOnH, 3)} hrs \u2022 Counter ${v.harvestCounterH == null ? "\u2014" : _fmt(v.harvestCounterH, 3) + " hrs"}`));
+  cards.appendChild(_makeKpiCard("Area Harvested", _fmt(v.areaHa, 3), "ha", q.area, n.area || q.area.notes || ""));
+  cards.appendChild(_makeKpiCard("Area per Hour", _fmt(v.haPerHour, 3), "ha/hr", { level: v.haPerHour == null ? "warn" : q.area.level, label: v.haPerHour == null ? "Check" : q.area.label, notes: v.haPerHour == null ? "Needs area + harvest time" : "" }, n.haPerHour));
+  cards.appendChild(_makeKpiCard("Dry Flow Avg (Harvest)", _fmt(v.dryFlowAvg, 3), "t/hr", q.dryFlow));
+  cards.appendChild(_makeKpiCard("Wet Yield Avg", _fmt(v.wetYield, 3), "t/ha", q.wetYield));
+  cards.appendChild(_makeKpiCard("Dry Yield Avg", _fmt(v.dryYield, 3), "t/ha", q.dryYield));
+  cards.appendChild(_makeKpiCard("Moisture Avg", _fmt(v.moisture, 3), "%", q.moisture));
+  cards.appendChild(_makeKpiCard("Fuel Used (Field Mode)", _fmt(v.fuelFieldL, 3), "L", q.fuelField));
+  cards.appendChild(_makeKpiCard("Fuel Used (Road Mode)", _fmt(v.fuelRoadL, 3), "L", q.fuelRoad));
+  cards.appendChild(_makeKpiCard("Fuel per Area (Field)", _fmt(v.fuelPerHa, 3), "L/ha", q.fuelPerHa));
+  cards.appendChild(_makeKpiCard("Road Distance (Diag)", _fmt(v.roadDistanceKm, 3), "km", q.roadDistance));
+  card1.appendChild(cards); grid.appendChild(card1);
+
+  // Detail table
+  const card2 = document.createElement("div"); card2.className = "chart-card full-width";
+  const h = document.createElement("div"); h.className = "chart-header";
+  const ht = document.createElement("div"); ht.className = "chart-title"; ht.textContent = "KPI Details";
+  const hs = document.createElement("div"); hs.className = "chart-subtitle"; hs.textContent = "Badges use machine-state timeline (staleness-based Unknown), plus counter vs state consistency.";
+  h.appendChild(ht); h.appendChild(hs); card2.appendChild(h);
+  const wrap = document.createElement("div"); wrap.className = "kpi-table-wrap";
+  const table = document.createElement("table"); table.className = "kpi-table";
+  table.innerHTML = `<thead><tr><th>KPI</th><th>Value</th><th>Status</th><th>Notes</th></tr></thead><tbody></tbody>`;
+
+  const harvNote = `State ${_fmt(v.harvestOnH, 3)} hrs \u2022 Counter ${v.harvestCounterH == null ? "\u2014" : _fmt(v.harvestCounterH, 3) + " hrs"}`;
+  const rows = [
+    { name: "Machine Power-On Hours (State)", value: `${_fmt(v.powerOnH, 3)} hrs`, q: q.powerOnH, notes: n.powerOnH },
+    { name: "Engine Running Hours (State)", value: `${_fmt(v.engineOnH, 3)} hrs`, q: q.engH, notes: n.engH },
+    { name: "Key-On (Engine Off) Hours (State)", value: `${_fmt(v.engineIdleH, 3)} hrs`, q: q.engineIdleH, notes: n.engineIdleH },
+    { name: "Rotor/Drum Operating Hours (State)", value: `${_fmt(v.rotorOnH, 3)} hrs`, q: q.rotH, notes: n.rotH },
+    { name: "Harvesting Hours (State)", value: `${_fmt(v.harvestOnH, 3)} hrs`, q: q.harvH, notes: harvNote },
+    { name: "Harvesting Hours (Counter)", value: (v.harvestCounterH == null ? "\u2014" : `${_fmt(v.harvestCounterH, 3)} hrs`), q: q.harvH, notes: "Secondary reference" },
+    { name: "Area Harvested", value: (v.areaHa == null ? "\u2014" : `${_fmt(v.areaHa, 3)} ha`), q: q.area, notes: n.area || "" },
+    { name: "Area per Hour (Primary)", value: (v.haPerHour == null ? "\u2014" : `${_fmt(v.haPerHour, 3)} ha/hr`), q: v.haPerHour == null ? { level: "warn", label: "Check", notes: "Needs area + harvest time" } : q.area, notes: n.haPerHour },
+    { name: "Dry Flow Avg during Harvest", value: (v.dryFlowAvg == null ? "\u2014" : `${_fmt(v.dryFlowAvg, 3)} t/hr`), q: q.dryFlow, notes: "" },
+    { name: "Wet Yield Avg (Area-Weighted)", value: (v.wetYield == null ? "\u2014" : `${_fmt(v.wetYield, 3)} t/ha`), q: q.wetYield, notes: "" },
+    { name: "Dry Yield Avg", value: (v.dryYield == null ? "\u2014" : `${_fmt(v.dryYield, 3)} t/ha`), q: q.dryYield, notes: "" },
+    { name: "Dry Yield (Dry Weight/Area)", value: (v.dryYieldFromWeight == null ? "\u2014" : `${_fmt(v.dryYieldFromWeight, 3)} t/ha`), q: q.dryYield, notes: "Diagnostic: counter-derived" },
+    { name: "Moisture Avg (Harvest-Weighted)", value: (v.moisture == null ? "\u2014" : `${_fmt(v.moisture, 3)} %`), q: q.moisture, notes: "" },
+    { name: "Fuel Used (Field Mode)", value: (v.fuelFieldL == null ? "\u2014" : `${_fmt(v.fuelFieldL, 3)} L`), q: q.fuelField, notes: "" },
+    { name: "Fuel Used (Road Mode)", value: (v.fuelRoadL == null ? "\u2014" : `${_fmt(v.fuelRoadL, 3)} L`), q: q.fuelRoad, notes: "" },
+    { name: "Fuel per Area (Field)", value: (v.fuelPerHa == null ? "\u2014" : `${_fmt(v.fuelPerHa, 3)} L/ha`), q: q.fuelPerHa, notes: "" },
+    { name: "Road Distance (Diagnostic)", value: (v.roadDistanceKm == null ? "\u2014" : `${_fmt(v.roadDistanceKm, 3)} km`), q: q.roadDistance, notes: `Road hours ${_fmt(v.roadOnH, 3)} hrs` }
+  ];
+  const tbody = table.querySelector("tbody");
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${r.name}</td><td>${r.value}</td><td><span class="${_badgeClass(r.q.level)}">${r.q.label}</span></td><td>${r.notes || r.q.notes || ""}</td>`;
+    tbody.appendChild(tr);
+  }
+  wrap.appendChild(table); card2.appendChild(wrap); grid.appendChild(card2);
+
+  // Explainer card
+  const card3 = document.createElement("div"); card3.className = "chart-card full-width";
+  card3.innerHTML = `
+    <div class="chart-header"><div class="chart-title">Understanding This Report</div><div class="chart-subtitle">A plain-language guide to the badges, numbers and terms used above.</div></div>
+    <div style="padding:0 16px 20px 16px;font-size:13px;line-height:1.7;color:#374151">
+      <h3 style="margin:16px 0 6px;font-size:15px;color:#111827">What do the badges mean?</h3>
+      <table style="border-collapse:collapse;width:100%;max-width:700px;font-size:13px;margin-bottom:12px">
+        <tr><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb"><span class="kpi-badge good">Good</span></td><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb">The data looks complete and reliable. You can trust this number.</td></tr>
+        <tr><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb"><span class="kpi-badge warn">Check</span></td><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb">The number is calculated but there may be gaps in the telemetry data, a counter reset, or a difference between two measurement methods. Worth double-checking against your own records.</td></tr>
+        <tr><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb"><span class="kpi-badge bad">Missing</span></td><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb">The combine did not report enough data for this value. It shows a dash (\u2014) instead of a number. This is normal \u2014 not every model exports every signal.</td></tr>
+      </table>
+      <h3 style="margin:20px 0 6px;font-size:15px;color:#111827">What is the difference between "State" and "Counter" hours?</h3>
+      <p style="margin:0 0 8px">The dashboard calculates many values in <strong>two independent ways</strong>, then compares them as a quality check:</p>
+      <table style="border-collapse:collapse;width:100%;max-width:750px;font-size:13px;margin-bottom:12px">
+        <thead><tr style="background:#f3f4f6"><th style="padding:8px 10px;text-align:left;border-bottom:2px solid #d1d5db">Method</th><th style="padding:8px 10px;text-align:left;border-bottom:2px solid #d1d5db">How it works</th><th style="padding:8px 10px;text-align:left;border-bottom:2px solid #d1d5db">Example</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:8px 10px;border-bottom:1px solid #e5e7eb;font-weight:600">State-derived</td><td style="padding:8px 10px;border-bottom:1px solid #e5e7eb">The dashboard looks at <em>live sensor readings</em> (engine RPM, rotor speed, grain flow, etc.) and figures out when the machine was actually running, harvesting or driving on the road \u2014 second by second.</td><td style="padding:8px 10px;border-bottom:1px solid #e5e7eb">"Engine RPM was above 500 for 8.300 hours total, so <strong>Engine Running Hours (State) = 8.300 hrs</strong>."</td></tr>
+          <tr><td style="padding:8px 10px;border-bottom:1px solid #e5e7eb;font-weight:600">Counter-derived</td><td style="padding:8px 10px;border-bottom:1px solid #e5e7eb">The combine itself keeps a running total (like the odometer in a car). The dashboard reads the counter at the start and end of the data window and takes the difference.</td><td style="padding:8px 10px;border-bottom:1px solid #e5e7eb">"Engine hours counter went from 1 204.500 to 1 212.700, so <strong>Counter = 8.200 hrs</strong>."</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:0 0 8px"><strong>If the two numbers agree closely</strong> (within about 15 minutes), the badge stays <span class="kpi-badge good">Good</span>. If they differ by more, you will see <span class="kpi-badge warn">Check</span>.</p>
+      <h3 style="margin:20px 0 6px;font-size:15px;color:#111827">Worked examples</h3>
+      <ul style="padding-left:20px;margin:0 0 8px">
+        <li style="margin-bottom:6px"><strong>Harvesting Hours = 6.200 hrs</strong> \u2014 The combine was actively harvesting for a total of 6.200 hours. This does NOT count idle time, road travel or lunch breaks.</li>
+        <li style="margin-bottom:6px"><strong>Area Harvested = 48.500 ha</strong> \u2014 The combine\u2019s area counter increased by 48.500 hectares during this period.</li>
+        <li style="margin-bottom:6px"><strong>Area per Hour = 7.823 ha/hr</strong> \u2014 How fast the combine is covering ground while actually harvesting (48.500 ha \u00f7 6.200 hrs).</li>
+        <li style="margin-bottom:6px"><strong>Dry Yield Avg = 2.150 t/ha</strong> \u2014 Average grain yield during harvest, from the combine\u2019s sensor, weighted by time in harvest mode.</li>
+        <li style="margin-bottom:6px"><strong>Fuel per Area = 12.300 L/ha</strong> \u2014 Field-mode fuel used divided by area harvested.</li>
+        <li style="margin-bottom:6px"><strong>Moisture Avg = 11.200 %</strong> \u2014 Grain moisture during harvest, time-weighted.</li>
+      </ul>
+      <p style="margin:12px 0 0;font-size:12px;color:#9ca3af">Tip: Use the date-range slider at the top of the dashboard to zoom into a single day or session and see how these KPIs change throughout the harvest.</p>
+    </div>`;
+  grid.appendChild(card3);
+}
+
+/* ========================================================================
+   CUSTOM CHART MODAL
+   ======================================================================== */
+function renderCustomChart(openEvenIfEmpty) {
+  const params = Array.from(selectedCustomParams);
+  if (!params.length) { if (openEvenIfEmpty) alert("Select at least one parameter from the dropdown first."); return; }
+  const traces = []; let anyPoints = false;
+  for (const pName of params) {
+    const series = (_getSeriesAny(pName)).filter(p => p.time >= currentStart && p.time <= currentEnd);
+    if (!series.length) continue;
+    anyPoints = true;
+    traces.push({ x: series.map(p => p.time), y: series.map(p => p.value), mode: "lines", name: pName });
+  }
+  if (!anyPoints) { if (openEvenIfEmpty) alert("No data for selected parameters in the chosen date range."); return; }
+  openModal("Custom parameters", null, null, "", traces);
+}
+
+function openModal(title, x, y, uom, traces) {
+  const backdrop = document.getElementById("modalBackdrop");
+  const titleEl = document.getElementById("modalTitle");
+  const plotDiv = document.getElementById("modalPlot");
+  titleEl.textContent = title;
+  backdrop.classList.add("active");
+  plotDiv.innerHTML = "";
+  let data = traces ? traces : [{ x, y, mode: "lines", name: title }];
+  Plotly.newPlot(plotDiv, data, {
+    margin: { l: 70, r: 30, t: 30, b: 60 },
+    xaxis: { title: "Time" }, yaxis: { title: uom || "" },
+    showlegend: !!traces, legend: { orientation: "h", x: 0, y: 1.1 }
+  }, { responsive: true });
+}
+
+function closeModal() { document.getElementById("modalBackdrop").classList.remove("active"); }
+
+/* ========================================================================
+   UI HELPERS
+   ======================================================================== */
+function showProcessing(text, detail) {
+  document.getElementById("processingText").textContent = text || "Processing\u2026";
+  document.getElementById("processingDetail").textContent = detail || "";
+  document.getElementById("processingOverlay").classList.add("active");
+}
+function updateProcessing(text, detail) {
+  if (text) document.getElementById("processingText").textContent = text;
+  if (detail) document.getElementById("processingDetail").textContent = detail;
+}
+function hideProcessing() { document.getElementById("processingOverlay").classList.remove("active"); }
+function yieldUI() { return new Promise(resolve => setTimeout(resolve, 16)); }
+</script>
+</body>
+</html>
