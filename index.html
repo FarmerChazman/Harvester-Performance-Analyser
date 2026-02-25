@@ -513,6 +513,7 @@ async function handleFiles(files) {
   try {
     // Parse all files
     let allRecordsByFile = [];
+    let parseDetails = [];
     for (let fi = 0; fi < files.length; fi++) {
       const file = files[fi];
       updateProcessing(`Reading file ${fi + 1} of ${files.length}…`, file.name);
@@ -521,10 +522,24 @@ async function handleFiles(files) {
       updateProcessing(`Parsing file ${fi + 1} of ${files.length}…`, file.name);
       await yieldUI();
       const records = await parseRecords(text);
+      parseDetails.push({ name: file.name, size: file.size, textLen: text.length, recordCount: records.length,
+        firstChars: text.trim().slice(0, 60), hasName: records.length > 0 && records[0].name !== undefined,
+        hasTimestamp: records.length > 0 && records[0].eventTimestamp !== undefined });
       if (records.length) allRecordsByFile.push({ fileName: file.name, records });
     }
 
-    if (!allRecordsByFile.length) throw new Error("No valid records found in any file.");
+    if (!allRecordsByFile.length) {
+      const diag = parseDetails.map(d =>
+        `• ${d.name} (${(d.size/1024).toFixed(0)}KB): ${d.recordCount} records parsed. ` +
+        `Starts with: "${d.firstChars}…"`
+      ).join("\n");
+      console.error("Parse diagnostics:", parseDetails);
+      throw new Error(
+        `No valid records found in any file.\n\nDiagnostics:\n${diag}\n\n` +
+        `Supported formats: JSONL, JSON array, tab-delimited (8+ cols), CSV with headers, concatenated JSON.\n` +
+        `Each record needs at minimum: name, eventTimestamp, and numericValue (or textValue).`
+      );
+    }
 
     // Group records by machine identity (nickname + vin)
     updateProcessing("Grouping by machine…", `${allRecordsByFile.length} file(s) with data`);
@@ -644,32 +659,72 @@ function readFileText(file) {
 }
 
 async function parseRecords(text) {
-  // Try JSON array first
+  /* ---- strip BOM ---- */
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
   const trimmed = text.trim();
-  if (trimmed.startsWith("[")) {
-    try {
-      const arr = JSON.parse(trimmed);
-      if (Array.isArray(arr)) return arr;
-    } catch (e) { /* fall through to line-by-line */ }
+  if (!trimmed) return [];
+
+  /* ---- helper: normalise a single record's field names ---- */
+  function normaliseRec(obj) {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return obj;
+    // Map textValue → stringValue (data uses textValue, app expects stringValue)
+    if (obj.textValue !== undefined && obj.stringValue === undefined) {
+      obj.stringValue = obj.textValue;
+    }
+    // Map ceqid → id
+    if (obj.ceqid !== undefined && obj.id === undefined) {
+      obj.id = obj.ceqid;
+    }
+    return obj;
   }
 
-  // JSONL / tab-delimited
+  /* ---- helper: try to unwrap a wrapper object ---- */
+  function unwrapIfNeeded(parsed) {
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === "object") {
+      // Look for first array-valued property (e.g. {data:[...]}, {records:[...]})
+      for (const key of ["data", "records", "items", "rows", "results", "values"]) {
+        if (Array.isArray(parsed[key]) && parsed[key].length) return parsed[key];
+      }
+      // Fallback: any array property
+      for (const key of Object.keys(parsed)) {
+        if (Array.isArray(parsed[key]) && parsed[key].length) return parsed[key];
+      }
+      // Single record object that looks like telemetry data
+      if (parsed.name || parsed.eventTimestamp || parsed.numericValue !== undefined) {
+        return [parsed];
+      }
+    }
+    return null;
+  }
+
+  const batchSize = 20000;
+
+  /* ==== Strategy 1: JSON array / wrapped JSON ==== */
+  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      const arr = unwrapIfNeeded(parsed);
+      if (arr && arr.length) return arr.map(normaliseRec);
+    } catch (e) { /* fall through to line-by-line strategies */ }
+  }
+
+  /* ==== Strategy 2: JSONL (one JSON object per line) ==== */
   const lines = text.split("\n");
   const records = [];
-  const batchSize = 20000;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
-
     if (line.startsWith("{")) {
-      try { records.push(JSON.parse(line)); } catch (e) { /* skip */ }
+      try { records.push(normaliseRec(JSON.parse(line))); } catch (e) { /* skip */ }
     } else {
+      // Tab-delimited: support 8+ columns (not just 10)
       const parts = line.split("\t");
-      if (parts.length >= 10) {
+      if (parts.length >= 8) {
         const numVal = parts[4] ? parseFloat(parts[4]) : null;
-        const lat = parts[8] ? parseFloat(parts[8]) : null;
-        const lon = parts[9] ? parseFloat(parts[9]) : null;
+        const lat = parts.length > 8 && parts[8] ? parseFloat(parts[8]) : null;
+        const lon = parts.length > 9 && parts[9] ? parseFloat(parts[9]) : null;
         records.push({
           id: parts[0], nickname: parts[1], vin: parts[2],
           name: parts[3],
@@ -682,13 +737,106 @@ async function parseRecords(text) {
         });
       }
     }
-
     if (i % batchSize === 0 && i > 0) {
       updateProcessing("Parsing records…", `${records.length.toLocaleString()} parsed so far`);
       await yieldUI();
     }
   }
-  return records;
+  if (records.length) return records;
+
+  /* ==== Strategy 3: Concatenated JSON (}{ or } { with no newline) ==== */
+  if (/\}\s*\{/.test(trimmed)) {
+    updateProcessing("Parsing concatenated JSON…", "splitting records");
+    await yieldUI();
+    const chunks = trimmed.split(/(?<=\})\s*(?=\{)/);
+    for (let i = 0; i < chunks.length; i++) {
+      try { records.push(normaliseRec(JSON.parse(chunks[i].trim()))); } catch (e) { /* skip */ }
+      if (i % batchSize === 0 && i > 0) {
+        updateProcessing("Parsing concatenated JSON…", `${records.length.toLocaleString()} parsed`);
+        await yieldUI();
+      }
+    }
+    if (records.length) return records;
+  }
+
+  /* ==== Strategy 4: CSV (comma-separated with header row) ==== */
+  if (lines.length >= 2 && lines[0].includes(",")) {
+    const headerLine = lines[0].trim();
+    // Must contain recognisable telemetry column names
+    const headerLower = headerLine.toLowerCase();
+    if (headerLower.includes("name") && (headerLower.includes("timestamp") || headerLower.includes("time"))) {
+      const headers = parseCSVRow(headerLine);
+      const hMap = {};
+      headers.forEach((h, idx) => { hMap[h.trim()] = idx; });
+      // Find column indices (case-insensitive search)
+      const findCol = (...names) => {
+        for (const n of names) {
+          for (const h of Object.keys(hMap)) {
+            if (h.toLowerCase() === n.toLowerCase()) return hMap[h];
+          }
+        }
+        return -1;
+      };
+      const ci = {
+        id: findCol("id", "ceqid"), nick: findCol("nickname"),
+        vin: findCol("vin"), name: findCol("name", "parameter", "param"),
+        numVal: findCol("numericValue", "numericvalue", "value", "numeric_value"),
+        strVal: findCol("stringValue", "stringvalue", "textValue", "textvalue", "text_value", "string_value"),
+        uom: findCol("uom", "unit"), ts: findCol("eventTimestamp", "eventtimestamp", "timestamp", "time", "event_timestamp"),
+        lat: findCol("lat", "latitude"), lon: findCol("lon", "lng", "longitude")
+      };
+      for (let i = 1; i < lines.length; i++) {
+        const row = lines[i].trim();
+        if (!row) continue;
+        const parts = parseCSVRow(row);
+        const get = (idx) => idx >= 0 && idx < parts.length ? parts[idx].trim() : null;
+        const numRaw = get(ci.numVal);
+        const numVal = numRaw ? parseFloat(numRaw) : null;
+        const latRaw = get(ci.lat);
+        const lonRaw = get(ci.lon);
+        const lat = latRaw ? parseFloat(latRaw) : null;
+        const lon = lonRaw ? parseFloat(lonRaw) : null;
+        records.push({
+          id: get(ci.id), nickname: get(ci.nick), vin: get(ci.vin),
+          name: get(ci.name),
+          numericValue: Number.isFinite(numVal) ? numVal : null,
+          stringValue: get(ci.strVal),
+          uom: get(ci.uom) || "",
+          eventTimestamp: get(ci.ts),
+          lat: Number.isFinite(lat) ? lat : null,
+          lon: Number.isFinite(lon) ? lon : null
+        });
+        if (i % batchSize === 0 && i > 0) {
+          updateProcessing("Parsing CSV…", `${records.length.toLocaleString()} parsed`);
+          await yieldUI();
+        }
+      }
+      if (records.length) return records;
+    }
+  }
+
+  return records; // empty – caller will report error
+}
+
+/* Simple CSV row parser (handles quoted fields with commas inside) */
+function parseCSVRow(row) {
+  const result = [];
+  let current = "";
+  let inQuote = false;
+  for (let i = 0; i < row.length; i++) {
+    const ch = row[i];
+    if (inQuote) {
+      if (ch === '"' && row[i + 1] === '"') { current += '"'; i++; }
+      else if (ch === '"') { inQuote = false; }
+      else { current += ch; }
+    } else {
+      if (ch === '"') { inQuote = true; }
+      else if (ch === ',') { result.push(current); current = ""; }
+      else { current += ch; }
+    }
+  }
+  result.push(current);
+  return result;
 }
 
 /* ========================================================================
@@ -722,7 +870,7 @@ function processData(records) {
 
     const pName = rec.name;
     let val = rec.numericValue;
-    const strVal = rec.stringValue;
+    const strVal = rec.stringValue || rec.textValue;
     const uom = rec.uom || "";
 
     // Use string value as fallback for null numeric
