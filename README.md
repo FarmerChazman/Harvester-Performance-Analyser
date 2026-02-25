@@ -2,7 +2,7 @@
 
 A client-side web application for visualising combine harvester telemetry data. Upload a JSON or JSONL telemetry export, and the dashboard renders GPS tracks on a satellite map, interactive time-series charts, and a comprehensive KPI (Key Performance Indicator) summary — **entirely in your browser** with no data leaving your machine.
 
-**[Launch the Web App →](https://sagars01.github.io/Harvester-Performance-Analyser/)**
+**[Launch the Web App →](https://FarmerChazman.github.io/Harvester-Performance-Analyser/)**
 
 ---
 
@@ -65,7 +65,7 @@ Processing happens entirely in JavaScript in the browser. No server, no uploads,
 
 ### Option A: Use the hosted version
 
-1. Navigate to **[https://sagars01.github.io/Harvester-Performance-Analyser/](https://sagars01.github.io/Harvester-Performance-Analyser/)**
+1. Navigate to **[https://FarmerChazman.github.io/Harvester-Performance-Analyser/](https://FarmerChazman.github.io/Harvester-Performance-Analyser/)**
 2. Drag your telemetry file onto the drop zone — or click **Select File**
 3. Wait for the processing spinner to finish
 4. Explore the dashboard!
@@ -73,7 +73,7 @@ Processing happens entirely in JavaScript in the browser. No server, no uploads,
 ### Option B: Run locally
 
 ```bash
-git clone https://github.com/sagars01/Harvester-Performance-Analyser.git
+git clone https://github.com/FarmerChazman/Harvester-Performance-Analyser.git
 cd Harvester-Performance-Analyser
 
 # Open in your default browser
@@ -364,7 +364,7 @@ The counter delta engine handles:
 3. Set Source to **Deploy from a branch**
 4. Select **main** branch, **/ (root)** folder
 5. Click **Save**
-6. Your app will be live at `https://<username>.github.io/Harvester-Performance-Analyser/`
+6. Your app will be live at `https://FarmerChazman.github.io/Harvester-Performance-Analyser/`
 
 ### Self-Hosting
 
