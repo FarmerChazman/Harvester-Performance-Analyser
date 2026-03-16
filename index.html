@@ -6,8 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="description" content="Upload combine harvester telemetry data (JSON/JSONL) and instantly visualise GPS tracks, engine metrics, harvest performance KPIs, and more — all in your browser." />
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/deck.gl@^9.0.0/dist.min.js"></script>
   <style>
 /* ========================================================================
    GLOBAL RESET & TYPOGRAPHY
@@ -146,7 +145,18 @@ header .machine-meta{font-size:12px;color:#6b7280}
 .map-symbols-row{display:flex;align-items:center;gap:8px;margin-top:6px}
 .map-symbol-dot{width:10px;height:10px;border-radius:999px;background:#ef4444;border:2px solid #dc2626;flex:0 0 auto}
 .map-symbol-line{width:20px;height:4px;background:#2563eb;border-radius:2px;flex:0 0 auto}
-.leaflet-container{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.map-layer-control{position:absolute;top:54px;left:10px;z-index:10001;background:rgba(255,255,255,.98);border:1px solid #d1d5db;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.18);padding:8px 10px;min-width:188px}
+.map-layer-control-title{font-size:11px;font-weight:600;color:#111827;margin-bottom:6px}
+.map-layer-option{display:flex;align-items:center;gap:8px;font-size:11px;color:#374151;margin-top:6px;cursor:pointer}
+.map-layer-option input{margin:0}
+.map-zoom-control{position:absolute;top:10px;left:10px;z-index:10001;display:flex;flex-direction:column;border:1px solid #d1d5db;border-radius:6px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.18);background:rgba(255,255,255,.98)}
+.map-zoom-control button{width:32px;height:32px;border:none;background:transparent;font-size:18px;color:#111827;cursor:pointer}
+.map-zoom-control button + button{border-top:1px solid #e5e7eb}
+.map-zoom-control button:hover{background:#f3f4f6}
+.map-scale-bar{position:absolute;left:12px;bottom:12px;z-index:10001;display:flex;flex-direction:column;align-items:flex-start;gap:2px}
+.map-scale-bar-line{height:6px;background:rgba(255,255,255,.92);border:1px solid rgba(17,24,39,.35);border-top:none;min-width:40px;box-shadow:0 1px 4px rgba(0,0,0,.18)}
+.map-scale-bar-label{font-size:10px;color:#111827;background:rgba(255,255,255,.92);padding:2px 6px;border-radius:4px;border:1px solid rgba(209,213,219,.9)}
+.map-attribution{position:absolute;right:12px;bottom:12px;z-index:10001;font-size:10px;color:#374151;background:rgba(255,255,255,.92);padding:2px 6px;border-radius:4px;border:1px solid rgba(209,213,219,.9)}
 
 /* Map Info Panel */
 .map-info-panel{position:absolute;top:10px;left:10px;right:auto;bottom:10px;z-index:10000;background:rgba(255,255,255,.98);border-radius:6px;padding:12px;width:420px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.2);border:1px solid #e5e7eb;display:block;transform:translateX(calc(-100% - 20px));opacity:0;pointer-events:none;transition:transform 160ms ease,opacity 160ms ease}
@@ -450,32 +460,156 @@ let currentEnd = new Date();
 let seriesByParam = new Map();
 let selectedCustomParams = new Set();
 let map = null;
-let pathLayer = null;
-let markersLayer = null;
 let activeMarker = null;
 let mapResizeHandler = null;
 let mapDisplayEvents = [];
 let mapInfoPinned = false;
-let mapMarkerBaseStyle = null;
-let mapMarkerHoverStyle = null;
-let mapMarkerActiveStyle = null;
 let mapInfoPanelHome = null;
 let _paramKeyIndex = new Map();
 let uploadedFileName = "";
 let machineStore = new Map();  // machineKey -> { records, info, seriesByParam, gpsEvents, allParams, start, end }
 let activeMachineKey = null;
 let allMachineKeys = [];
+let activeKpiContext = null;
+let dataWorker = null;
+let workerJobSeq = 0;
+let pendingWorkerJobs = new Map();
+let dashboardWired = false;
+let paramMenuDocHandler = null;
+let uploadBgMap = null;
+let mapRenderState = null;
+let mapViewState = null;
+let mapBaseLayerId = "googleHybrid";
+let mapHoverIndex = null;
+
+const DATA_WORKER_URL = "assets/data-worker.js";
+const MAP_BASEMAPS = {
+  googleHybrid: {
+    label: "Google Satellite (Hybrid)",
+    attribution: "Google Maps",
+    layers: [{ id: "google-hybrid", urlTemplate: "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", maxZoom: 20 }]
+  },
+  esriHybrid: {
+    label: "ESRI Satellite (Hybrid)",
+    attribution: "Esri",
+    layers: [
+      { id: "esri-imagery", urlTemplate: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", maxZoom: 19 },
+      { id: "esri-labels", urlTemplate: "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", maxZoom: 19 }
+    ]
+  },
+  osm: {
+    label: "OpenStreetMap",
+    attribution: "OpenStreetMap",
+    layers: [{ id: "osm-base", urlTemplate: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", maxZoom: 19 }]
+  }
+};
 
 /* ========================================================================
-   UPLOAD SCREEN — Background Map
+   MAP / WORKER HELPERS
    ======================================================================== */
-(function initUploadBgMap() {
+function getDataWorker() {
+  if (!window.Worker) return null;
+  if (dataWorker) return dataWorker;
+
+  dataWorker = new Worker(DATA_WORKER_URL);
+  dataWorker.addEventListener("message", (event) => {
+    const msg = event.data || {};
+    if (msg.type === "progress") {
+      updateProcessing(msg.title, msg.detail);
+      return;
+    }
+    const pending = pendingWorkerJobs.get(msg.jobId);
+    if (!pending) return;
+    if (msg.type === "complete") {
+      pendingWorkerJobs.delete(msg.jobId);
+      pending.resolve(msg.machines || []);
+      return;
+    }
+    if (msg.type === "error") {
+      pendingWorkerJobs.delete(msg.jobId);
+      pending.reject(new Error(msg.error || "Worker processing failed"));
+    }
+  });
+  dataWorker.addEventListener("error", (event) => {
+    pendingWorkerJobs.forEach((job) => job.reject(event.error || new Error("Worker failure")));
+    pendingWorkerJobs.clear();
+  });
+  return dataWorker;
+}
+
+function processFilesWithWorker(files) {
+  const worker = getDataWorker();
+  if (!worker) return null;
+  const jobId = ++workerJobSeq;
+  return new Promise((resolve, reject) => {
+    pendingWorkerJobs.set(jobId, { resolve, reject });
+    worker.postMessage({ type: "process-files", jobId, files });
+  });
+}
+
+function _tile2long(x, z) { return (x / Math.pow(2, z)) * 360 - 180; }
+function _tile2lat(y, z) {
+  const n = Math.PI - (2 * Math.PI * y) / Math.pow(2, z);
+  return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+}
+function _expandTileUrl(urlTemplate, x, y, z) {
+  const subdomain = ["a", "b", "c"][(x + y) % 3];
+  return urlTemplate
+    .replace("{s}", subdomain)
+    .replace("{x}", String(x))
+    .replace("{y}", String(y))
+    .replace("{z}", String(z));
+}
+function _makeTileLayer(id, urlTemplate, maxZoom) {
+  return new deck.TileLayer({
+    id,
+    minZoom: 0,
+    maxZoom: maxZoom || 20,
+    tileSize: 256,
+    data: ({ x, y, z }) => _expandTileUrl(urlTemplate, x, y, z),
+    renderSubLayers: (props) => {
+      const { x, y, z } = props.tile.index;
+      const west = _tile2long(x, z);
+      const east = _tile2long(x + 1, z);
+      const north = _tile2lat(y, z);
+      const south = _tile2lat(y + 1, z);
+      return new deck.BitmapLayer(props, {
+        id: `${id}-${x}-${y}-${z}`,
+        image: props.data,
+        bounds: [west, south, east, north]
+      });
+    }
+  });
+}
+function _makeBasemapLayers() {
+  const config = MAP_BASEMAPS[mapBaseLayerId] || MAP_BASEMAPS.googleHybrid;
+  return config.layers.map((layer) => _makeTileLayer(layer.id, layer.urlTemplate, layer.maxZoom));
+}
+function _createDeckInstance(parentEl, initialViewState, controller) {
+  return new deck.Deck({
+    parent: parentEl,
+    width: "100%",
+    height: "100%",
+    initialViewState,
+    viewState: initialViewState,
+    controller,
+    layers: [],
+    getCursor: ({ isHovering }) => isHovering ? "pointer" : "grab",
+    onViewStateChange: ({ viewState }) => {
+      mapViewState = { ...viewState, pitch: 0, bearing: 0 };
+      if (map) map.setProps({ viewState: mapViewState });
+      updateMapScaleBar();
+    }
+  });
+}
+function _createUploadBackgroundMap() {
   const el = document.getElementById("uploadBgMap");
-  if (!el) return;
-  const bgMap = L.map(el, { zoomControl: false, attributionControl: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false, keyboard: false });
-  bgMap.setView([-25.2744, 133.7751], 4);
-  L.tileLayer("https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", { maxZoom: 20 }).addTo(bgMap);
-})();
+  if (!el || !window.deck) return;
+  if (uploadBgMap && typeof uploadBgMap.finalize === "function") uploadBgMap.finalize();
+  uploadBgMap = _createDeckInstance(el, { longitude: 133.7751, latitude: -25.2744, zoom: 4, minZoom: 3, maxZoom: 5, pitch: 0, bearing: 0 }, false);
+  uploadBgMap.setProps({ layers: MAP_BASEMAPS.googleHybrid.layers.map((layer) => _makeTileLayer(`upload-${layer.id}`, layer.urlTemplate, layer.maxZoom)) });
+}
+(function initUploadBgMap() { _createUploadBackgroundMap(); })();
 
 /* ========================================================================
    FILE UPLOAD HANDLING
@@ -498,6 +632,75 @@ let allMachineKeys = [];
 })();
 
 async function handleFiles(files) {
+  if (!files.length) return;
+
+  machineStore = new Map();
+  allMachineKeys = [];
+  activeMachineKey = null;
+  activeKpiContext = null;
+  mapBaseLayerId = "googleHybrid";
+  mapHoverIndex = null;
+  activeMarker = null;
+
+  const totalSize = files.reduce((s, f) => s + f.size, 0);
+  showProcessing(`Reading ${files.length} file${files.length > 1 ? "s" : ""}...`, `${(totalSize / 1048576).toFixed(1)} MB total`);
+
+  const preview = document.getElementById("fileListPreview");
+  preview.innerHTML = files.map(f => `<span class="file-tag">${f.name}</span>`).join("");
+
+  try {
+    let machines = null;
+    if (window.Worker) {
+      try {
+        machines = await processFilesWithWorker(files);
+      } catch (workerError) {
+        console.warn("Worker processing failed, falling back to main thread parsing.", workerError);
+      }
+    }
+    if (!machines) {
+      return await handleFilesLegacy(files);
+    }
+
+    hydrateMachineStore(machines);
+    activeMachineKey = allMachineKeys[0];
+    switchToMachine(activeMachineKey);
+
+    updateProcessing("Building dashboard...", "Almost there");
+    await yieldUI();
+
+    initDashboard();
+    buildMachineBar();
+    hideProcessing();
+    document.getElementById("uploadScreen").classList.add("hidden");
+    document.getElementById("dashboard").style.display = "";
+  } catch (err) {
+    hideProcessing();
+    alert("Error processing files: " + err.message);
+    console.error(err);
+  }
+}
+
+function hydrateMachineStore(machines) {
+  machineStore = new Map();
+  allMachineKeys = [];
+  for (const machine of machines || []) {
+    const data = {
+      info: machine.info || {},
+      seriesByParam: new Map(Object.entries(machine.seriesByParam || {})),
+      gpsEvents: machine.gpsEvents || [],
+      allParams: machine.allParams || [],
+      start: new Date(machine.startMs || Date.now()),
+      end: new Date(machine.endMs || Date.now()),
+      fileNames: machine.fileNames || [],
+      recordCount: machine.recordCount || 0,
+      kpiContext: machine.kpiContext || null
+    };
+    machineStore.set(machine.key, data);
+    allMachineKeys.push(machine.key);
+  }
+}
+
+async function handleFilesLegacy(files) {
   if (!files.length) return;
   machineStore = new Map();
   allMachineKeys = [];
@@ -600,7 +803,8 @@ async function handleFiles(files) {
         start: new Date(currentStart),
         end: new Date(currentEnd),
         fileNames: fileNames,
-        recordCount: records.length
+        recordCount: records.length,
+        kpiContext: null
       });
       allMachineKeys.push(machineKey);
     }
@@ -635,6 +839,10 @@ function switchToMachine(machineKey) {
   currentStart = new Date(data.start);
   currentEnd = new Date(data.end);
   uploadedFileName = data.fileNames.join(", ");
+  activeKpiContext = data.kpiContext || null;
+  mapViewState = null;
+  mapHoverIndex = null;
+  activeMarker = null;
   _reindexParamKeys();
   document.getElementById("startInput").value = currentStart.toISOString().slice(0, 16);
   document.getElementById("endInput").value = currentEnd.toISOString().slice(0, 16);
@@ -1055,13 +1263,15 @@ function processData(records) {
     }
 
     const timeVal = new Date(ts);
-    if (isNaN(timeVal.getTime())) continue;
-    allTimestamps.push(timeVal);
+    const timeMs = timeVal.getTime();
+    if (isNaN(timeMs)) continue;
+    const timeIso = timeVal.toISOString();
+    allTimestamps.push(timeMs);
 
     if (pName && val != null) {
       if (!seriesByParam.has(pName)) seriesByParam.set(pName, []);
       const converted = convertUnitAndValue(val, uom);
-      seriesByParam.get(pName).push({ time: timeVal, value: converted.value, uom: converted.uom });
+      seriesByParam.get(pName).push({ time: timeIso, timeMs: timeMs, value: converted.value, uom: converted.uom });
     }
 
     // Collect GPS data
@@ -1070,7 +1280,7 @@ function processData(records) {
     const tsKey = ts;
 
     if (!gpsMap.has(tsKey)) {
-      gpsMap.set(tsKey, { lat: null, lon: null, time: timeVal, params: [] });
+      gpsMap.set(tsKey, { lat: null, lon: null, time: timeIso, timeMs: timeMs, params: [] });
     }
     const gpsEntry = gpsMap.get(tsKey);
     if (lat != null && Number.isFinite(lat)) gpsEntry.lat = lat;
@@ -1082,7 +1292,7 @@ function processData(records) {
 
   // Sort each series
   for (const arr of seriesByParam.values()) {
-    arr.sort((a, b) => a.time - b.time);
+    arr.sort((a, b) => a.timeMs - b.timeMs);
   }
   _reindexParamKeys();
 
@@ -1115,19 +1325,20 @@ function processData(records) {
     }
 
     GPS_EVENTS.push({
-      time: entry.time.toISOString(),
+      time: entry.time,
+      timeMs: entry.timeMs,
       lat: entry.lat,
       lon: entry.lon,
       gps: gpsData,
       data: eventData
     });
   }
-  GPS_EVENTS.sort((a, b) => a.time.localeCompare(b.time));
+  GPS_EVENTS.sort((a, b) => a.timeMs - b.timeMs);
 
   // Machine info
   allTimestamps.sort((a, b) => a - b);
-  const startTs = allTimestamps.length ? allTimestamps[0] : new Date();
-  const endTs = allTimestamps.length ? allTimestamps[allTimestamps.length - 1] : new Date();
+  const startTs = new Date(allTimestamps.length ? allTimestamps[0] : Date.now());
+  const endTs = new Date(allTimestamps.length ? allTimestamps[allTimestamps.length - 1] : Date.now());
 
   MACHINE_INFO = {
     nickname: first.nickname || "",
@@ -1168,7 +1379,10 @@ function initDashboard() {
   buildGroupTabs();
   buildSubgroupChips();
   buildParamMenu();
-  wireFilters();
+  if (!dashboardWired) {
+    wireFilters();
+    dashboardWired = true;
+  }
   renderCurrentSubgroup();
 }
 
@@ -1188,14 +1402,22 @@ function hydrateMachineInfo() {
 /* ========================================================================
    UTILITY FUNCTIONS
    ======================================================================== */
+function _pointMs(point) {
+  if (!point) return NaN;
+  if (Number.isFinite(point.timeMs)) return point.timeMs;
+  if (point.time instanceof Date) return point.time.getTime();
+  return Date.parse(point.time);
+}
 function _lb(arr, targetTime) {
+  const targetMs = targetTime instanceof Date ? targetTime.getTime() : Number(targetTime);
   let lo = 0, hi = arr.length;
-  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid].time < targetTime) lo = mid + 1; else hi = mid; }
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (_pointMs(arr[mid]) < targetMs) lo = mid + 1; else hi = mid; }
   return lo;
 }
 function _ub(arr, targetTime) {
+  const targetMs = targetTime instanceof Date ? targetTime.getTime() : Number(targetTime);
   let lo = 0, hi = arr.length;
-  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid].time <= targetTime) lo = mid + 1; else hi = mid; }
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (_pointMs(arr[mid]) <= targetMs) lo = mid + 1; else hi = mid; }
   return lo;
 }
 function _normParamName(s) {
@@ -1315,6 +1537,7 @@ function buildParamMenu() {
         const opt = document.createElement("div");
         opt.className = "param-option";
         opt.dataset.param = paramName;
+        if (selectedCustomParams.has(paramName)) opt.classList.add("selected");
         const label = document.createElement("span"); label.textContent = paramName;
         const tick = document.createElement("span"); tick.className = "tick"; tick.textContent = "\u2713";
         opt.appendChild(label); opt.appendChild(tick);
@@ -1329,8 +1552,10 @@ function buildParamMenu() {
     const divider = document.createElement("div"); divider.className = "param-divider"; menu.appendChild(divider);
   }
   const toggleBtn = document.getElementById("paramDropdownToggle");
-  toggleBtn.addEventListener("click", (e) => { e.stopPropagation(); menu.classList.toggle("open"); });
-  document.addEventListener("click", (e) => { if (!menu.contains(e.target) && e.target !== toggleBtn) menu.classList.remove("open"); });
+  toggleBtn.onclick = (e) => { e.stopPropagation(); menu.classList.toggle("open"); };
+  if (paramMenuDocHandler) document.removeEventListener("click", paramMenuDocHandler);
+  paramMenuDocHandler = (e) => { if (!menu.contains(e.target) && e.target !== toggleBtn) menu.classList.remove("open"); };
+  document.addEventListener("click", paramMenuDocHandler);
   updateParamDropdownLabel();
 }
 
@@ -1355,14 +1580,16 @@ function wireFilters() {
   document.getElementById("mapInfoClose").addEventListener("click", () => {
     mapInfoPinned = false;
     document.getElementById("mapInfoPanel").classList.remove("active");
-    if (activeMarker && typeof activeMarker.setStyle === "function" && mapMarkerBaseStyle) activeMarker.setStyle(mapMarkerBaseStyle);
     activeMarker = null;
+    mapHoverIndex = null;
+    refreshMapLayers();
   });
   document.getElementById("mapInfoChevron").addEventListener("click", () => {
     mapInfoPinned = false;
     document.getElementById("mapInfoPanel").classList.remove("active");
-    if (activeMarker && typeof activeMarker.setStyle === "function" && mapMarkerBaseStyle) activeMarker.setStyle(mapMarkerBaseStyle);
     activeMarker = null;
+    mapHoverIndex = null;
+    refreshMapLayers();
   });
   document.getElementById("loadNewFileBtn").addEventListener("click", () => {
     document.getElementById("dashboard").style.display = "none";
@@ -1371,6 +1598,9 @@ function wireFilters() {
     document.getElementById("fileInput").value = "";
     document.getElementById("fileListPreview").innerHTML = "";
     machineStore = new Map(); allMachineKeys = []; activeMachineKey = null;
+    activeKpiContext = null;
+    selectedCustomParams = new Set();
+    updateParamDropdownLabel();
     document.getElementById("machineBar").style.display = "none";
   });
 }
@@ -1380,8 +1610,8 @@ function wireFilters() {
    ======================================================================== */
 function teardownMap() {
   if (mapResizeHandler) { window.removeEventListener("resize", mapResizeHandler); mapResizeHandler = null; }
-  if (map && typeof map.remove === "function") map.remove();
-  map = null; pathLayer = null; markersLayer = null; activeMarker = null; mapInfoPinned = false;
+  if (map && typeof map.finalize === "function") map.finalize();
+  map = null; activeMarker = null; mapHoverIndex = null; mapInfoPinned = false; mapRenderState = null; mapViewState = null;
 }
 
 /* ========================================================================
@@ -1460,7 +1690,7 @@ function renderCurrentSubgroup() {
         const binMs = Math.max(1, Math.floor((endMs - startMs) / maxBars));
         const bins = new Map();
         for (let i = startIdx; i < endIdx; i++) {
-          const t = fullSeries[i].time.getTime();
+          const t = _pointMs(fullSeries[i]);
           const v = Number(fullSeries[i].value);
           if (!Number.isFinite(v)) continue;
           const binIndex = Math.floor((t - startMs) / binMs);
@@ -1502,6 +1732,202 @@ function renderCurrentSubgroup() {
 /* ========================================================================
    MAP VIEW (GPS / Position tab)
    ======================================================================== */
+function _sliceGpsEventsForWindow(startTime, endTime) {
+  return GPS_EVENTS.slice(_lb(GPS_EVENTS, startTime), _ub(GPS_EVENTS, endTime));
+}
+
+function _buildMapDisplayEvents(events) {
+  const validEvents = [];
+  for (const ev of events) {
+    if (typeof ev.lat !== "number" || typeof ev.lon !== "number" || !Number.isFinite(ev.lat) || !Number.isFinite(ev.lon) || Math.abs(ev.lat) > 90 || Math.abs(ev.lon) > 180) continue;
+    if (ev.lat === 0 || ev.lon === 0) continue;
+    validEvents.push(ev);
+  }
+
+  const displayEvents = [];
+  let prevKey = null;
+  for (const ev of validEvents) {
+    const key = `${ev.lat.toFixed(6)},${ev.lon.toFixed(6)}`;
+    if (key === prevKey && displayEvents.length) {
+      const last = displayEvents[displayEvents.length - 1];
+      last.sampleCount += 1;
+      last.timeLast = ev.time;
+      last.time = ev.time;
+      last.timeMs = ev.timeMs ?? Date.parse(ev.time);
+      last.gps = ev.gps;
+      last.data = ev.data;
+      continue;
+    }
+    displayEvents.push({ ...ev, __index: displayEvents.length, coordKey: key, sampleCount: 1, timeFirst: ev.time, timeLast: ev.time });
+    prevKey = key;
+  }
+  return displayEvents;
+}
+
+function _fitMapViewState(mapContainer, displayEvents) {
+  if (!displayEvents.length) return { longitude: 133.7751, latitude: -25.2744, zoom: 4, pitch: 0, bearing: 0 };
+  if (displayEvents.length === 1) {
+    return { longitude: displayEvents[0].lon, latitude: displayEvents[0].lat, zoom: 18, pitch: 0, bearing: 0 };
+  }
+  let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+  for (const event of displayEvents) {
+    minLat = Math.min(minLat, event.lat);
+    maxLat = Math.max(maxLat, event.lat);
+    minLon = Math.min(minLon, event.lon);
+    maxLon = Math.max(maxLon, event.lon);
+  }
+  const viewport = new deck.WebMercatorViewport({
+    width: Math.max(mapContainer.clientWidth, 1),
+    height: Math.max(mapContainer.clientHeight, 1)
+  });
+  const fitted = viewport.fitBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 36 });
+  return { longitude: fitted.longitude, latitude: fitted.latitude, zoom: Math.min(fitted.zoom, 18), pitch: 0, bearing: 0 };
+}
+
+function _buildMapLayers() {
+  const layers = _makeBasemapLayers();
+  if (!mapRenderState) return layers;
+
+  const displayEvents = mapRenderState.displayEvents;
+  const activeEvent = Number.isInteger(activeMarker) ? displayEvents[activeMarker] : null;
+  const hoverEvent = (!mapInfoPinned && Number.isInteger(mapHoverIndex)) ? displayEvents[mapHoverIndex] : null;
+
+  if (mapRenderState.path.length > 1) {
+    layers.push(new deck.PathLayer({
+      id: "gps-path",
+      data: [{ path: mapRenderState.path }],
+      getPath: d => d.path,
+      getColor: [37, 99, 235, 204],
+      widthUnits: "pixels",
+      getWidth: 4,
+      rounded: true
+    }));
+  }
+
+  layers.push(new deck.ScatterplotLayer({
+    id: "gps-points",
+    data: displayEvents,
+    pickable: true,
+    stroked: true,
+    filled: true,
+    radiusUnits: "pixels",
+    lineWidthUnits: "pixels",
+    getPosition: d => [d.lon, d.lat],
+    getRadius: 4,
+    getFillColor: [239, 68, 68, 217],
+    getLineColor: [220, 38, 38, 255],
+    getLineWidth: 1,
+    onHover: (info) => {
+      const nextIndex = info.object ? info.object.__index : null;
+      if (nextIndex === mapHoverIndex) return;
+      mapHoverIndex = nextIndex;
+      if (info.object) {
+        if (!mapInfoPinned) showMapInfoPanel(info.object, info.object.__index, false);
+      } else if (!mapInfoPinned) {
+        hideMapInfoPanel();
+      }
+      refreshMapLayers();
+    },
+    onClick: (info) => {
+      if (!info.object) return;
+      mapInfoPinned = true;
+      activeMarker = info.object.__index;
+      mapHoverIndex = info.object.__index;
+      showMapInfoPanel(info.object, info.object.__index, true);
+      refreshMapLayers();
+    }
+  }));
+
+  if (hoverEvent) {
+    layers.push(new deck.ScatterplotLayer({
+      id: "gps-hover-point",
+      data: [hoverEvent],
+      stroked: true,
+      filled: true,
+      radiusUnits: "pixels",
+      lineWidthUnits: "pixels",
+      getPosition: d => [d.lon, d.lat],
+      getRadius: 5,
+      getFillColor: [239, 68, 68, 242],
+      getLineColor: [220, 38, 38, 255],
+      getLineWidth: 1
+    }));
+  }
+
+  if (activeEvent) {
+    layers.push(new deck.ScatterplotLayer({
+      id: "gps-active-point",
+      data: [activeEvent],
+      stroked: true,
+      filled: true,
+      radiusUnits: "pixels",
+      lineWidthUnits: "pixels",
+      getPosition: d => [d.lon, d.lat],
+      getRadius: 6,
+      getFillColor: [249, 115, 22, 242],
+      getLineColor: [234, 88, 12, 255],
+      getLineWidth: 1.5
+    }));
+  }
+
+  return layers;
+}
+
+function refreshMapLayers() {
+  if (!map || !mapRenderState) return;
+  map.setProps({ layers: _buildMapLayers() });
+  updateMapAttribution();
+  updateMapScaleBar();
+}
+
+function updateMapAttribution() {
+  if (!mapRenderState || !mapRenderState.attributionEl) return;
+  const basemap = MAP_BASEMAPS[mapBaseLayerId] || MAP_BASEMAPS.googleHybrid;
+  mapRenderState.attributionEl.textContent = basemap.attribution || "";
+}
+
+function updateMapScaleBar() {
+  if (!mapRenderState || !mapRenderState.scaleLine || !mapRenderState.scaleLabel || !mapViewState) return;
+  const metersPerPixel = 156543.03392 * Math.cos((mapViewState.latitude || 0) * Math.PI / 180) / Math.pow(2, mapViewState.zoom || 0);
+  const targetPx = 120;
+  const targetMeters = metersPerPixel * targetPx;
+  if (!(targetMeters > 0)) return;
+  const exponent = Math.pow(10, Math.floor(Math.log10(targetMeters)));
+  const candidates = [1, 2, 5].map(v => v * exponent);
+  let distance = candidates[0];
+  for (const candidate of candidates) {
+    if (candidate <= targetMeters) distance = candidate;
+  }
+  const width = Math.max(30, distance / metersPerPixel);
+  mapRenderState.scaleLine.style.width = `${Math.round(width)}px`;
+  mapRenderState.scaleLabel.textContent = distance >= 1000 ? `${(distance / 1000).toFixed(distance >= 10000 ? 0 : 1)} km` : `${Math.round(distance)} m`;
+}
+
+function _buildMapLayerControl() {
+  const control = document.createElement("div");
+  control.className = "map-layer-control";
+  control.innerHTML = `<div class="map-layer-control-title">Base map</div>`;
+  Object.entries(MAP_BASEMAPS).forEach(([id, cfg]) => {
+    const label = document.createElement("label");
+    label.className = "map-layer-option";
+    label.innerHTML = `<input type="radio" name="mapBasemap" value="${id}" ${id === mapBaseLayerId ? "checked" : ""}><span>${cfg.label}</span>`;
+    const input = label.querySelector("input");
+    input.addEventListener("change", () => {
+      mapBaseLayerId = id;
+      refreshMapLayers();
+    });
+    control.appendChild(label);
+  });
+  return control;
+}
+
+function _stepMapZoom(delta) {
+  if (!map || !mapViewState) return;
+  mapViewState = { ...mapViewState, zoom: Math.max(2, Math.min(20, (mapViewState.zoom || 0) + delta)), pitch: 0, bearing: 0 };
+  map.setProps({ viewState: mapViewState });
+  updateMapScaleBar();
+}
+
 function renderMapView() {
   const contentEl = document.querySelector("main.content");
   if (contentEl) contentEl.classList.add("map-mode");
@@ -1514,41 +1940,35 @@ function renderMapView() {
   const mapContainer = document.createElement("div"); mapContainer.id = "mapContainer";
   mapRoot.appendChild(mapContainer);
 
+  const zoomControl = document.createElement("div");
+  zoomControl.className = "map-zoom-control";
+  zoomControl.innerHTML = '<button type="button" aria-label="Zoom in">+</button><button type="button" aria-label="Zoom out">-</button>';
+  zoomControl.querySelectorAll("button")[0].addEventListener("click", () => _stepMapZoom(1));
+  zoomControl.querySelectorAll("button")[1].addEventListener("click", () => _stepMapZoom(-1));
+  mapRoot.appendChild(zoomControl);
+
+  const layerControl = _buildMapLayerControl();
+  mapRoot.appendChild(layerControl);
+
   const symbolsBox = document.createElement("div"); symbolsBox.className = "map-symbols-box";
   symbolsBox.innerHTML = '<div style="font-weight:600">Symbols</div><div class="map-symbols-row"><div class="map-symbol-dot"></div><div>GPS point</div></div><div class="map-symbols-row"><div class="map-symbol-line"></div><div>Travel path</div></div>';
   mapRoot.appendChild(symbolsBox);
 
+  const scaleBar = document.createElement("div");
+  scaleBar.className = "map-scale-bar";
+  scaleBar.innerHTML = '<div class="map-scale-bar-line"></div><div class="map-scale-bar-label"></div>';
+  mapRoot.appendChild(scaleBar);
+
+  const attribution = document.createElement("div");
+  attribution.className = "map-attribution";
+  mapRoot.appendChild(attribution);
+
   const mapInfoPanel = document.getElementById("mapInfoPanel");
   if (mapInfoPanel) { mapRoot.appendChild(mapInfoPanel); mapInfoPanel.classList.remove("active"); }
-  mapInfoPinned = false; activeMarker = null;
+  mapInfoPinned = false; activeMarker = null; mapHoverIndex = null;
   grid.appendChild(mapRoot);
 
-  // Filter GPS events by date range
-  const filteredEvents = GPS_EVENTS.filter(ev => {
-    const evTime = new Date(ev.time);
-    return evTime >= currentStart && evTime <= currentEnd;
-  });
-
-  // Validate + deduplicate
-  const validEvents = [];
-  for (const ev of filteredEvents) {
-    if (typeof ev.lat !== "number" || typeof ev.lon !== "number" || !Number.isFinite(ev.lat) || !Number.isFinite(ev.lon) || Math.abs(ev.lat) > 90 || Math.abs(ev.lon) > 180) continue;
-    if (ev.lat === 0 || ev.lon === 0) continue;
-    validEvents.push(ev);
-  }
-
-  const displayEvents = [];
-  let prevKey = null;
-  for (const ev of validEvents) {
-    const key = `${ev.lat.toFixed(6)},${ev.lon.toFixed(6)}`;
-    if (key === prevKey && displayEvents.length) {
-      const last = displayEvents[displayEvents.length - 1];
-      last.sampleCount += 1; last.timeLast = ev.time; last.time = ev.time; last.gps = ev.gps; last.data = ev.data;
-      continue;
-    }
-    displayEvents.push({ ...ev, coordKey: key, sampleCount: 1, timeFirst: ev.time, timeLast: ev.time });
-    prevKey = key;
-  }
+  const displayEvents = _buildMapDisplayEvents(_sliceGpsEventsForWindow(currentStart, currentEnd));
   mapDisplayEvents = displayEvents;
 
   if (displayEvents.length === 0) {
@@ -1556,57 +1976,35 @@ function renderMapView() {
     return;
   }
 
-  const centerLat = displayEvents.reduce((s, e) => s + e.lat, 0) / displayEvents.length;
-  const centerLon = displayEvents.reduce((s, e) => s + e.lon, 0) / displayEvents.length;
+  mapRenderState = {
+    displayEvents,
+    path: displayEvents.map(e => [e.lon, e.lat]),
+    scaleLine: scaleBar.querySelector(".map-scale-bar-line"),
+    scaleLabel: scaleBar.querySelector(".map-scale-bar-label"),
+    attributionEl: attribution
+  };
 
-  map = L.map("mapContainer", { preferCanvas: true, zoomControl: true }).setView([centerLat, centerLon], 15);
-
-  // Google Hybrid satellite tiles
-  const googleHybrid = L.tileLayer("https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", { maxZoom: 20, attribution: "&copy; Google Maps" });
-  const esriImagery = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri", maxZoom: 19 });
-  const esriLabels = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", { maxZoom: 19 });
-  const esriHybrid = L.layerGroup([esriImagery, esriLabels]);
-  const osm = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" });
-
-  googleHybrid.addTo(map);
-  L.control.layers({ "Google Satellite (Hybrid)": googleHybrid, "ESRI Satellite (Hybrid)": esriHybrid, "OpenStreetMap": osm }, null, { position: "topleft" }).addTo(map);
-  L.control.scale({ imperial: false }).addTo(map);
-
-  // Path polyline
-  const pathPoints = displayEvents.map(e => [e.lat, e.lon]);
-  pathLayer = L.polyline(pathPoints, { color: "#2563eb", weight: 4, opacity: 0.8, lineJoin: "round", lineCap: "round" }).addTo(map);
-
-  // Dot markers
-  markersLayer = L.layerGroup().addTo(map);
-  mapMarkerBaseStyle = { radius: 4, fillColor: "#ef4444", color: "#dc2626", weight: 1, opacity: 1, fillOpacity: 0.85 };
-  mapMarkerHoverStyle = { ...mapMarkerBaseStyle, radius: 5, fillOpacity: 0.95 };
-  mapMarkerActiveStyle = { ...mapMarkerBaseStyle, radius: 6, fillColor: "#f97316", color: "#ea580c", fillOpacity: 0.95 };
-  const canvasRenderer = L.canvas({ padding: 0.5 });
-
-  displayEvents.forEach((ev, idx) => {
-    const marker = L.circleMarker([ev.lat, ev.lon], { ...mapMarkerBaseStyle, renderer: canvasRenderer });
-    marker.on("mouseover", () => { if (marker !== activeMarker) marker.setStyle(mapMarkerHoverStyle); if (!mapInfoPinned) showMapInfoPanel(ev, idx, false); });
-    marker.on("mouseout", () => { if (marker !== activeMarker) marker.setStyle(mapMarkerBaseStyle); if (!mapInfoPinned) hideMapInfoPanel(); });
-    marker.on("click", () => {
-      mapInfoPinned = true; showMapInfoPanel(ev, idx, true);
-      if (activeMarker && activeMarker !== marker) activeMarker.setStyle(mapMarkerBaseStyle);
-      activeMarker = marker; marker.setStyle(mapMarkerActiveStyle);
-    });
-    markersLayer.addLayer(marker);
-  });
-
-  if (displayEvents.length > 1) map.fitBounds(pathLayer.getBounds(), { padding: [20, 20] });
-  else map.setView([displayEvents[0].lat, displayEvents[0].lon], 18);
+  mapViewState = _fitMapViewState(mapContainer, displayEvents);
+  map = _createDeckInstance(mapContainer, mapViewState, { dragRotate: false, touchRotate: false, doubleClickZoom: true });
+  refreshMapLayers();
 
   if (mapResizeHandler) window.removeEventListener("resize", mapResizeHandler);
-  mapResizeHandler = () => { if (map) map.invalidateSize(); };
+  mapResizeHandler = () => {
+    if (!map) return;
+    map.redraw(true);
+    updateMapScaleBar();
+  };
   window.addEventListener("resize", mapResizeHandler, { passive: true });
-  setTimeout(() => map && map.invalidateSize(), 0);
+  setTimeout(() => updateMapScaleBar(), 0);
 }
 
 function hideMapInfoPanel() {
   const panel = document.getElementById("mapInfoPanel");
   if (panel) panel.classList.remove("active");
+  if (!mapInfoPinned) {
+    mapHoverIndex = null;
+    refreshMapLayers();
+  }
 }
 
 function showMapInfoPanel(event, pointIndex, pinned) {
@@ -1669,7 +2067,7 @@ function showMapInfoPanel(event, pointIndex, pinned) {
 function _maxGapMinutes(series) {
   if (!series || series.length < 2) return 0;
   let maxMs = 0;
-  for (let i = 0; i < series.length - 1; i++) { const dt = series[i+1].time - series[i].time; if (dt > maxMs) maxMs = dt; }
+  for (let i = 0; i < series.length - 1; i++) { const dt = _pointMs(series[i + 1]) - _pointMs(series[i]); if (dt > maxMs) maxMs = dt; }
   return maxMs / 60000;
 }
 
@@ -1682,7 +2080,7 @@ function _counterDelta(series, startTime, endTime, opts) {
   if (!series || series.length < 2) return { total, resets, outliers, points: (series||[]).length };
   const startMs = startTime.getTime(), endMs = endTime.getTime();
   for (let i = 0; i < series.length - 1; i++) {
-    const t0ms = series[i].time.getTime(), t1ms = series[i+1].time.getTime();
+    const t0ms = _pointMs(series[i]), t1ms = _pointMs(series[i + 1]);
     if (t1ms <= startMs || t0ms >= endMs) continue;
     const segMs = t1ms - t0ms;
     if (!(segMs > 0)) continue;
@@ -1704,8 +2102,8 @@ function _zohAverage(series, startTime, endTime) {
   const startMs = startTime.getTime(), endMs = endTime.getTime();
   let num = 0, den = 0;
   for (let i = 0; i < series.length; i++) {
-    const t0 = series[i].time.getTime();
-    const t1 = (i < series.length - 1) ? series[i+1].time.getTime() : endMs;
+    const t0 = _pointMs(series[i]);
+    const t1 = (i < series.length - 1) ? _pointMs(series[i + 1]) : endMs;
     if (t1 <= startMs || t0 >= endMs) continue;
     const v = Number(series[i].value);
     if (!Number.isFinite(v)) continue;
@@ -1736,12 +2134,13 @@ function _uniqueSortedTimesMs(msArr) {
 }
 
 function _zohSampleAt(series, t, staleMs) {
+  const targetMs = t instanceof Date ? t.getTime() : Number(t);
   if (!series || !series.length) return { value: null, sampleMs: null, ageMs: Infinity, hadSample: false };
   const idx = _ub(series, t) - 1;
   for (let j = idx; j >= 0; j--) {
-    const v = Number(series[j].value); const tm = series[j].time.getTime();
+    const v = Number(series[j].value); const tm = _pointMs(series[j]);
     if (!Number.isFinite(tm) || !Number.isFinite(v)) continue;
-    const age = t.getTime() - tm;
+    const age = targetMs - tm;
     const fresh = (age < staleMs);
     return { value: fresh ? v : null, sampleMs: tm, ageMs: age, hadSample: true };
   }
@@ -1774,7 +2173,59 @@ function _addDayBoundaries(timesMs, startMs, endMs, tzOffsetMin) {
   }
 }
 
+function _clipTimeline(baseTimeline, startTime, endTime) {
+  const startMs = startTime.getTime();
+  const endMs = endTime.getTime();
+  const clippedSegments = [];
+  let powerOnMs = 0, engineOnMs = 0, engineIdleMs = 0, rotorOnMs = 0, harvestOnMs = 0, roadOnMs = 0, unknownMs = 0, maxUnknownRunMs = 0, curUnknownRunMs = 0, roadDistanceKm = 0;
+
+  for (const seg of (baseTimeline?.segments || [])) {
+    const t0ms = seg.t0ms ?? seg.t0?.getTime?.();
+    const t1ms = seg.t1ms ?? seg.t1?.getTime?.();
+    if (!(t1ms > t0ms)) continue;
+    if (t1ms <= startMs || t0ms >= endMs) continue;
+    const a0 = Math.max(t0ms, startMs);
+    const a1 = Math.min(t1ms, endMs);
+    const ms = a1 - a0;
+    if (!(ms > 0)) continue;
+
+    const frac = ms / (seg.ms || (t1ms - t0ms));
+    const clipped = { ...seg, t0ms: a0, t1ms: a1, ms };
+    clippedSegments.push(clipped);
+
+    if (clipped.unknown) { unknownMs += ms; curUnknownRunMs += ms; if (curUnknownRunMs > maxUnknownRunMs) maxUnknownRunMs = curUnknownRunMs; } else { curUnknownRunMs = 0; }
+    if (clipped.powerOn) powerOnMs += ms;
+    if (clipped.engineOn) engineOnMs += ms;
+    if (clipped.engineIdle) engineIdleMs += ms;
+    if (clipped.rotorOn) rotorOnMs += ms;
+    if (clipped.harvestOn) harvestOnMs += ms;
+    if (clipped.roadOn) {
+      roadOnMs += ms;
+      roadDistanceKm += (seg.roadDistanceKm != null) ? seg.roadDistanceKm * frac : ((Number(seg.vals?.groundSpeed) || 0) * (ms / 3600000));
+    }
+  }
+
+  return {
+    segments: clippedSegments,
+    summary: {
+      powerOnH: powerOnMs / 3600000,
+      engineOnH: engineOnMs / 3600000,
+      engineIdleH: engineIdleMs / 3600000,
+      rotorOnH: rotorOnMs / 3600000,
+      harvestOnH: harvestOnMs / 3600000,
+      roadOnH: roadOnMs / 3600000,
+      unknownH: unknownMs / 3600000,
+      roadDistanceKm,
+      maxUnknownRunMs
+    },
+    meta: baseTimeline?.meta || { hasAnyKey: false, keyCounts: {} }
+  };
+}
+
 function _buildStateTimeline(startTime, endTime, cfg, names) {
+  if (activeKpiContext && activeKpiContext.baseTimeline) {
+    return _clipTimeline(activeKpiContext.baseTimeline, startTime, endTime);
+  }
   const startMs = startTime.getTime(), endMs = endTime.getTime(), staleMs = cfg.staleMs;
   const tzOffsetMin = (MACHINE_INFO && MACHINE_INFO.tz_offset_min != null) ? MACHINE_INFO.tz_offset_min : 0;
 
@@ -1797,7 +2248,7 @@ function _buildStateTimeline(startTime, endTime, cfg, names) {
   const timesMs = [startMs, endMs];
   for (const ks of keySeries) {
     for (const p of (ks.series || [])) {
-      const tm = p.time.getTime();
+      const tm = _pointMs(p);
       if (!(tm >= startMs && tm <= endMs)) continue;
       timesMs.push(tm); timesMs.push(Math.min(endMs, tm + staleMs));
     }
@@ -1824,13 +2275,12 @@ function _buildStateTimeline(startTime, endTime, cfg, names) {
     if (t1ms <= startMs || t0ms >= endMs) continue;
     const a0 = Math.max(t0ms, startMs), a1 = Math.min(t1ms, endMs), segMs = a1 - a0;
     if (!(segMs > 0)) continue;
-    const t0 = new Date(a0);
 
-    const vals = {}, ages = {}, sampleMsMap = {};
+    const vals = {};
     let lastKeySampleMs = null;
     for (const ks of keySeries) {
-      const s = _zohSampleAt(ks.series, t0, staleMs);
-      vals[ks.key] = s.value; ages[ks.key] = s.ageMs; sampleMsMap[ks.key] = s.sampleMs;
+      const s = _zohSampleAt(ks.series, a0, staleMs);
+      vals[ks.key] = s.value;
       if (s.sampleMs != null) lastKeySampleMs = (lastKeySampleMs == null) ? s.sampleMs : Math.max(lastKeySampleMs, s.sampleMs);
     }
 
@@ -1844,7 +2294,9 @@ function _buildStateTimeline(startTime, endTime, cfg, names) {
     const roadKnown = (vals.groundSpeed != null && vals.dryFlow != null);
     const roadOn = (powerOn && engineOn && roadKnown && vals.groundSpeed > cfg.road.speedMinKmh && (vals.workingWidth == null || vals.workingWidth <= cfg.road.widthMaxM) && vals.dryFlow <= roadFlowMax && !harvestOn);
 
-    segments.push({ t0: new Date(a0), t1: new Date(a1), ms: segMs, unknown, powerOn, engineOn, engineIdle, rotorOn, harvestOn, harvestKnown, roadOn, vals, ages, sampleMs: sampleMsMap, lastKeySampleMs });
+    let segRoadDistanceKm = 0;
+    if (roadOn) { const spd = vals.groundSpeed; if (Number.isFinite(spd)) segRoadDistanceKm = spd * (segMs / 3600000); }
+    segments.push({ t0ms: a0, t1ms: a1, ms: segMs, unknown, powerOn, engineOn, engineIdle, rotorOn, harvestOn, harvestKnown, roadOn, roadDistanceKm: segRoadDistanceKm, vals: { groundSpeed: vals.groundSpeed, workingWidth: vals.workingWidth } });
 
     if (unknown) { unknownMs += segMs; curUnknownRunMs += segMs; if (curUnknownRunMs > maxUnknownRunMs) maxUnknownRunMs = curUnknownRunMs; } else { curUnknownRunMs = 0; }
     if (powerOn) powerOnMs += segMs;
@@ -1852,7 +2304,10 @@ function _buildStateTimeline(startTime, endTime, cfg, names) {
     if (engineIdle) engineIdleMs += segMs;
     if (rotorOn) rotorOnMs += segMs;
     if (harvestOn) harvestOnMs += segMs;
-    if (roadOn) { roadOnMs += segMs; const spd = vals.groundSpeed; if (Number.isFinite(spd)) roadDistanceKm += spd * (segMs / 3600000); }
+    if (roadOn) {
+      roadDistanceKm += segRoadDistanceKm;
+      roadOnMs += segMs;
+    }
   }
 
   return {
@@ -1871,7 +2326,7 @@ function _timelineWeightedAverage(series, timeline, predFn, opts) {
   let num = 0, den = 0, usedSegs = 0;
   for (const seg of timeline.segments) {
     if (!predFn(seg)) continue;
-    const s = (staleMs != null) ? _zohSampleAt(series, seg.t0, staleMs) : { value: _valueAtOrBefore(series, seg.t0) };
+    const s = (staleMs != null) ? _zohSampleAt(series, seg.t0ms, staleMs) : { value: _valueAtOrBefore(series, seg.t0ms) };
     const v = Number(s.value);
     if (!Number.isFinite(v)) continue;
     num += v * seg.ms; den += seg.ms; usedSegs += 1;
@@ -1882,7 +2337,7 @@ function _timelineWeightedAverage(series, timeline, predFn, opts) {
 function _activeMsBetween(a0ms, a1ms, timeline, predFn) {
   let ms = 0;
   if (!timeline || !timeline.segments) return 0;
-  for (const seg of timeline.segments) { const ov = _overlapMs(seg.t0.getTime(), seg.t1.getTime(), a0ms, a1ms); if (ov <= 0) continue; if (predFn(seg)) ms += ov; }
+  for (const seg of timeline.segments) { const ov = _overlapMs(seg.t0ms, seg.t1ms, a0ms, a1ms); if (ov <= 0) continue; if (predFn(seg)) ms += ov; }
   return ms;
 }
 
@@ -1916,10 +2371,10 @@ function _counterDeltaReplayAware(series, startTime, endTime, opts) {
   const startMs = startTime.getTime(), endMs = endTime.getTime();
   let total = 0, resets = 0, replays = 0, outliers = 0;
   let hwm = 0;
-  for (const p of series) { const v = Number(p.value); if (!Number.isFinite(v)) continue; const t = p.time.getTime(); if (t < startMs) { hwm = v; continue; } hwm = v; break; }
+  for (const p of series) { const v = Number(p.value); if (!Number.isFinite(v)) continue; const t = _pointMs(p); if (t < startMs) { hwm = v; continue; } hwm = v; break; }
 
   for (let i = 0; i < series.length - 1; i++) {
-    const t0ms = series[i].time.getTime(), t1ms = series[i + 1].time.getTime();
+    const t0ms = _pointMs(series[i]), t1ms = _pointMs(series[i + 1]);
     if (!(t1ms > t0ms)) continue;
     if (t1ms <= startMs || t0ms >= endMs) continue;
     const v0 = Number(series[i].value), v1 = Number(series[i + 1].value);
@@ -1959,10 +2414,10 @@ function _counterDeltaStateAware(series, timeline, stateKey, opts) {
   const startMs = opts.startTime ? opts.startTime.getTime() : null;
   const endMs = opts.endTime ? opts.endTime.getTime() : null;
   let hwm = 0;
-  for (const p of series) { const v = Number(p.value); if (!Number.isFinite(v)) continue; const t = p.time.getTime(); if (startMs != null && t < startMs) { hwm = v; continue; } hwm = v; break; }
+  for (const p of series) { const v = Number(p.value); if (!Number.isFinite(v)) continue; const t = _pointMs(p); if (startMs != null && t < startMs) { hwm = v; continue; } hwm = v; break; }
 
   for (let i = 0; i < series.length - 1; i++) {
-    const t0ms = series[i].time.getTime(), t1ms = series[i + 1].time.getTime();
+    const t0ms = _pointMs(series[i]), t1ms = _pointMs(series[i + 1]);
     if (!(t1ms > t0ms)) continue;
     if (startMs != null && t1ms <= startMs) continue;
     if (endMs != null && t0ms >= endMs) continue;
@@ -2019,9 +2474,9 @@ function _qualityFromTimelineAndCounters(opts) {
 }
 
 function _computeKpis(startTime, endTime) {
-  const cfg = _defaultKpiCfg();
-  const rotorSpeedName = _pickFirstSeriesName(["Rotor/Drum Speed", "Rotor / Drum Speed", "Rotor Speed", "Rotor"]);
-  const names = { engineSpeed: "Engine Speed", rotorSpeed: rotorSpeedName, dryFlow: "Dry Flow - Average", feederSpeed: "Feeder Speed", fanSpeed: "Fan Speed", groundSpeed: "Ground Speed", workingWidth: "Working Width" };
+  const cfg = activeKpiContext?.cfg || _defaultKpiCfg();
+  const rotorSpeedName = activeKpiContext?.names?.rotorSpeed || _pickFirstSeriesName(["Rotor/Drum Speed", "Rotor / Drum Speed", "Rotor Speed", "Rotor"]);
+  const names = activeKpiContext?.names || { engineSpeed: "Engine Speed", rotorSpeed: rotorSpeedName, dryFlow: "Dry Flow - Average", feederSpeed: "Feeder Speed", fanSpeed: "Fan Speed", groundSpeed: "Ground Speed", workingWidth: "Working Width" };
   const timeline = _buildStateTimeline(startTime, endTime, cfg, names);
 
   const engH = _sliceSeriesForWindow("Engine hours", startTime, endTime, true);
@@ -2088,7 +2543,7 @@ function _computeKpis(startTime, endTime) {
   let fuelSource = "counter";
   if (fuelFieldL == null && fuelRoadL == null && fuelRate && fuelRate.length >= 2) {
     let fieldL = 0, roadL = 0, usedSegs = 0;
-    for (const seg of timeline.segments) { if (seg.unknown || !seg.engineOn) continue; const s = _zohSampleAt(fuelRate, seg.t0, cfg.staleMs); const rate = Number(s.value); if (!Number.isFinite(rate) || rate < 0) continue; const hrs = seg.ms / 3600000; const litres = rate * hrs; if (seg.roadOn) roadL += litres; else fieldL += litres; usedSegs += 1; }
+    for (const seg of timeline.segments) { if (seg.unknown || !seg.engineOn) continue; const s = _zohSampleAt(fuelRate, seg.t0ms, cfg.staleMs); const rate = Number(s.value); if (!Number.isFinite(rate) || rate < 0) continue; const hrs = seg.ms / 3600000; const litres = rate * hrs; if (seg.roadOn) roadL += litres; else fieldL += litres; usedSegs += 1; }
     if (usedSegs > 0) { fuelFieldL = fieldL; fuelRoadL = roadL; fuelSource = "rate"; }
   }
   const fuelTotalL = (fuelFieldL != null || fuelRoadL != null) ? ((fuelFieldL || 0) + (fuelRoadL || 0)) : null;
@@ -2262,7 +2717,12 @@ function renderCustomChart(openEvenIfEmpty) {
   if (!params.length) { if (openEvenIfEmpty) alert("Select at least one parameter from the dropdown first."); return; }
   const traces = []; let anyPoints = false;
   for (const pName of params) {
-    const series = (_getSeriesAny(pName)).filter(p => p.time >= currentStart && p.time <= currentEnd);
+    const startMs = currentStart.getTime();
+    const endMs = currentEnd.getTime();
+    const series = (_getSeriesAny(pName)).filter(p => {
+      const timeMs = _pointMs(p);
+      return timeMs >= startMs && timeMs <= endMs;
+    });
     if (!series.length) continue;
     anyPoints = true;
     traces.push({ x: series.map(p => p.time), y: series.map(p => p.value), mode: "lines", name: pName });

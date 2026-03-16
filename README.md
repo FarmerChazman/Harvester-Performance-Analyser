@@ -47,7 +47,7 @@ Processing happens entirely in JavaScript in the browser. No server, no uploads,
 | **Multi-File Upload** | Select or drag-drop multiple files at once — one per machine, up to 8+ |
 | **Fleet Machine Selector** | Purple machine bar lets you switch between harvesters instantly |
 | **Drag & Drop Upload** | JSON or JSONL files up to several hundred MB |
-| **Google Hybrid Satellite Map** | Leaflet map with Google satellite imagery, ESRI fallback, and OpenStreetMap option |
+| **Google Hybrid Satellite Map** | deck.gl raster basemap with Google satellite imagery, ESRI fallback, and OpenStreetMap option |
 | **Default Australia View** | Background map centred on Australia (–25.27, 133.78) at zoom 4 |
 | **GPS Track Visualisation** | Polyline path + interactive point markers with telemetry pop-up |
 | **5 Dashboard Tabs** | Machine Status & GPS, Engine & Driveline, Harvest Performance, Settings & Automation, Reports & KPIs |
@@ -62,7 +62,8 @@ Processing happens entirely in JavaScript in the browser. No server, no uploads,
 | **Date Range Filtering** | Zoom to any time window within the data |
 | **Print / PDF** | Built-in print button for the KPI report |
 | **Fully Client-Side** | Zero server dependencies — works offline after initial load |
-| **Single-File App** | One `index.html` — no build step, no dependencies to install |
+| **Worker-Based Processing** | File parsing and machine preprocessing run in a dedicated Web Worker to keep the UI responsive |
+| **Static App** | `index.html` plus a small worker asset — no build step, no dependencies to install |
 
 ---
 
@@ -89,7 +90,7 @@ open index.html           # macOS
 xdg-open index.html       # Linux
 ```
 
-No web server is required for local use (CDN links for Plotly and Leaflet will load if you have internet, but the core logic is inline).
+No web server is required for local use (CDN links for Plotly and deck.gl will load if you have internet, but the core logic is inline).
 
 ### Option C: Download just the HTML file
 
@@ -373,7 +374,7 @@ The counter delta engine handles:
 | Component | Technology | Version |
 |-----------|-----------|---------|
 | Charts | [Plotly.js](https://plotly.com/javascript/) | 2.35.2 |
-| Maps | [Leaflet](https://leafletjs.com/) | 1.9.4 |
+| Maps | [deck.gl](https://deck.gl/) | 9.x CDN build |
 | Satellite Tiles | Google Maps (Hybrid), ESRI World Imagery (fallback), OpenStreetMap |
 | Styling | Custom CSS (inline) | — |
 | Architecture | Single-file HTML application | — |
@@ -399,7 +400,7 @@ Copy `index.html` to any static file server (Nginx, Apache, S3, Cloudflare Pages
 
 ### Offline Use
 
-Download `index.html` and open it directly in a browser. The only external dependencies are the Plotly and Leaflet CDN links — if you're offline, cache these files locally or use a bundled version.
+Download `index.html` and the `assets/` folder, then open the page directly in a browser. The only external dependencies are the Plotly and deck.gl CDN links — if you're offline, cache these files locally or use a bundled version.
 
 ---
 
