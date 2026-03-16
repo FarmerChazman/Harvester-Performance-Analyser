@@ -145,18 +145,6 @@ header .machine-meta{font-size:12px;color:#6b7280}
 .map-symbols-row{display:flex;align-items:center;gap:8px;margin-top:6px}
 .map-symbol-dot{width:10px;height:10px;border-radius:999px;background:#ef4444;border:2px solid #dc2626;flex:0 0 auto}
 .map-symbol-line{width:20px;height:4px;background:#2563eb;border-radius:2px;flex:0 0 auto}
-.map-layer-control{position:absolute;top:54px;left:10px;z-index:10001;background:rgba(255,255,255,.98);border:1px solid #d1d5db;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.18);padding:8px 10px;min-width:188px}
-.map-layer-control-title{font-size:11px;font-weight:600;color:#111827;margin-bottom:6px}
-.map-layer-option{display:flex;align-items:center;gap:8px;font-size:11px;color:#374151;margin-top:6px;cursor:pointer}
-.map-layer-option input{margin:0}
-.map-zoom-control{position:absolute;top:10px;left:10px;z-index:10001;display:flex;flex-direction:column;border:1px solid #d1d5db;border-radius:6px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.18);background:rgba(255,255,255,.98)}
-.map-zoom-control button{width:32px;height:32px;border:none;background:transparent;font-size:18px;color:#111827;cursor:pointer}
-.map-zoom-control button + button{border-top:1px solid #e5e7eb}
-.map-zoom-control button:hover{background:#f3f4f6}
-.map-scale-bar{position:absolute;left:12px;bottom:12px;z-index:10001;display:flex;flex-direction:column;align-items:flex-start;gap:2px}
-.map-scale-bar-line{height:6px;background:rgba(255,255,255,.92);border:1px solid rgba(17,24,39,.35);border-top:none;min-width:40px;box-shadow:0 1px 4px rgba(0,0,0,.18)}
-.map-scale-bar-label{font-size:10px;color:#111827;background:rgba(255,255,255,.92);padding:2px 6px;border-radius:4px;border:1px solid rgba(209,213,219,.9)}
-.map-attribution{position:absolute;right:12px;bottom:12px;z-index:10001;font-size:10px;color:#374151;background:rgba(255,255,255,.92);padding:2px 6px;border-radius:4px;border:1px solid rgba(209,213,219,.9)}
 
 /* Map Info Panel */
 .map-info-panel{position:absolute;top:10px;left:10px;right:auto;bottom:10px;z-index:10000;background:rgba(255,255,255,.98);border-radius:6px;padding:12px;width:420px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.2);border:1px solid #e5e7eb;display:block;transform:translateX(calc(-100% - 20px));opacity:0;pointer-events:none;transition:transform 160ms ease,opacity 160ms ease}
@@ -582,8 +570,22 @@ function _makeTileLayer(id, urlTemplate, maxZoom) {
   });
 }
 function _makeBasemapLayers() {
-  const config = MAP_BASEMAPS[mapBaseLayerId] || MAP_BASEMAPS.googleHybrid;
+  const config = MAP_BASEMAPS.googleHybrid;
   return config.layers.map((layer) => _makeTileLayer(layer.id, layer.urlTemplate, layer.maxZoom));
+}
+function _nextPaint() {
+  return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+function _estimateZoomFromBounds(minLat, maxLat, minLon, maxLon, width, height) {
+  const safeWidth = Math.max(width, 320);
+  const safeHeight = Math.max(height, 240);
+  const lonSpan = Math.max(1e-6, Math.abs(maxLon - minLon));
+  const clampLat = (lat) => Math.max(-85, Math.min(85, lat));
+  const mercY = (lat) => Math.log(Math.tan(Math.PI / 4 + (clampLat(lat) * Math.PI / 180) / 2));
+  const latSpanMerc = Math.max(1e-6, Math.abs(mercY(maxLat) - mercY(minLat)));
+  const zoomX = Math.log2((safeWidth * 360) / (256 * lonSpan));
+  const zoomY = Math.log2((safeHeight * (2 * Math.PI)) / (256 * latSpanMerc));
+  return Math.max(2, Math.min(18, Math.min(zoomX, zoomY)));
 }
 function _createDeckInstance(parentEl, initialViewState, controller) {
   return new deck.Deck({
@@ -666,13 +668,13 @@ async function handleFiles(files) {
     switchToMachine(activeMachineKey);
 
     updateProcessing("Building dashboard...", "Almost there");
-    await yieldUI();
+    document.getElementById("uploadScreen").classList.add("hidden");
+    document.getElementById("dashboard").style.display = "";
+    await _nextPaint();
 
     initDashboard();
     buildMachineBar();
     hideProcessing();
-    document.getElementById("uploadScreen").classList.add("hidden");
-    document.getElementById("dashboard").style.display = "";
   } catch (err) {
     hideProcessing();
     alert("Error processing files: " + err.message);
@@ -814,13 +816,13 @@ async function handleFilesLegacy(files) {
     switchToMachine(activeMachineKey);
 
     updateProcessing("Building dashboard…", "Almost there");
-    await yieldUI();
+    document.getElementById("uploadScreen").classList.add("hidden");
+    document.getElementById("dashboard").style.display = "";
+    await _nextPaint();
 
     initDashboard();
     buildMachineBar();
     hideProcessing();
-    document.getElementById("uploadScreen").classList.add("hidden");
-    document.getElementById("dashboard").style.display = "";
   } catch (err) {
     hideProcessing();
     alert("Error processing files: " + err.message);
@@ -1776,12 +1778,32 @@ function _fitMapViewState(mapContainer, displayEvents) {
     minLon = Math.min(minLon, event.lon);
     maxLon = Math.max(maxLon, event.lon);
   }
-  const viewport = new deck.WebMercatorViewport({
-    width: Math.max(mapContainer.clientWidth, 1),
-    height: Math.max(mapContainer.clientHeight, 1)
-  });
-  const fitted = viewport.fitBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 36 });
-  return { longitude: fitted.longitude, latitude: fitted.latitude, zoom: Math.min(fitted.zoom, 18), pitch: 0, bearing: 0 };
+  const centerLon = (minLon + maxLon) / 2;
+  const centerLat = (minLat + maxLat) / 2;
+  if (![minLat, maxLat, minLon, maxLon, centerLat, centerLon].every(Number.isFinite)) {
+    return { longitude: 133.7751, latitude: -25.2744, zoom: 4, pitch: 0, bearing: 0 };
+  }
+  const width = Math.max(mapContainer.clientWidth, 320);
+  const height = Math.max(mapContainer.clientHeight, 240);
+  const lonSpan = Math.abs(maxLon - minLon);
+  const latSpan = Math.abs(maxLat - minLat);
+  if (lonSpan < 1e-6 && latSpan < 1e-6) {
+    return { longitude: centerLon, latitude: centerLat, zoom: 18, pitch: 0, bearing: 0 };
+  }
+  try {
+    const viewport = new deck.WebMercatorViewport({ width, height });
+    const fitted = viewport.fitBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 36 });
+    return { longitude: fitted.longitude, latitude: fitted.latitude, zoom: Math.min(fitted.zoom, 18), pitch: 0, bearing: 0 };
+  } catch (error) {
+    console.warn("Map fitBounds fallback used:", error);
+    return {
+      longitude: centerLon,
+      latitude: centerLat,
+      zoom: _estimateZoomFromBounds(minLat, maxLat, minLon, maxLon, width, height),
+      pitch: 0,
+      bearing: 0
+    };
+  }
 }
 
 function _buildMapLayers() {
@@ -1796,6 +1818,7 @@ function _buildMapLayers() {
     layers.push(new deck.PathLayer({
       id: "gps-path",
       data: [{ path: mapRenderState.path }],
+      coordinateSystem: deck.COORDINATE_SYSTEM.LNGLAT,
       getPath: d => d.path,
       getColor: [37, 99, 235, 204],
       widthUnits: "pixels",
@@ -1812,6 +1835,7 @@ function _buildMapLayers() {
     filled: true,
     radiusUnits: "pixels",
     lineWidthUnits: "pixels",
+    coordinateSystem: deck.COORDINATE_SYSTEM.LNGLAT,
     getPosition: d => [d.lon, d.lat],
     getRadius: 4,
     getFillColor: [239, 68, 68, 217],
@@ -1846,6 +1870,7 @@ function _buildMapLayers() {
       filled: true,
       radiusUnits: "pixels",
       lineWidthUnits: "pixels",
+      coordinateSystem: deck.COORDINATE_SYSTEM.LNGLAT,
       getPosition: d => [d.lon, d.lat],
       getRadius: 5,
       getFillColor: [239, 68, 68, 242],
@@ -1862,6 +1887,7 @@ function _buildMapLayers() {
       filled: true,
       radiusUnits: "pixels",
       lineWidthUnits: "pixels",
+      coordinateSystem: deck.COORDINATE_SYSTEM.LNGLAT,
       getPosition: d => [d.lon, d.lat],
       getRadius: 6,
       getFillColor: [249, 115, 22, 242],
@@ -1903,31 +1929,6 @@ function updateMapScaleBar() {
   mapRenderState.scaleLabel.textContent = distance >= 1000 ? `${(distance / 1000).toFixed(distance >= 10000 ? 0 : 1)} km` : `${Math.round(distance)} m`;
 }
 
-function _buildMapLayerControl() {
-  const control = document.createElement("div");
-  control.className = "map-layer-control";
-  control.innerHTML = `<div class="map-layer-control-title">Base map</div>`;
-  Object.entries(MAP_BASEMAPS).forEach(([id, cfg]) => {
-    const label = document.createElement("label");
-    label.className = "map-layer-option";
-    label.innerHTML = `<input type="radio" name="mapBasemap" value="${id}" ${id === mapBaseLayerId ? "checked" : ""}><span>${cfg.label}</span>`;
-    const input = label.querySelector("input");
-    input.addEventListener("change", () => {
-      mapBaseLayerId = id;
-      refreshMapLayers();
-    });
-    control.appendChild(label);
-  });
-  return control;
-}
-
-function _stepMapZoom(delta) {
-  if (!map || !mapViewState) return;
-  mapViewState = { ...mapViewState, zoom: Math.max(2, Math.min(20, (mapViewState.zoom || 0) + delta)), pitch: 0, bearing: 0 };
-  map.setProps({ viewState: mapViewState });
-  updateMapScaleBar();
-}
-
 function renderMapView() {
   const contentEl = document.querySelector("main.content");
   if (contentEl) contentEl.classList.add("map-mode");
@@ -1940,28 +1941,9 @@ function renderMapView() {
   const mapContainer = document.createElement("div"); mapContainer.id = "mapContainer";
   mapRoot.appendChild(mapContainer);
 
-  const zoomControl = document.createElement("div");
-  zoomControl.className = "map-zoom-control";
-  zoomControl.innerHTML = '<button type="button" aria-label="Zoom in">+</button><button type="button" aria-label="Zoom out">-</button>';
-  zoomControl.querySelectorAll("button")[0].addEventListener("click", () => _stepMapZoom(1));
-  zoomControl.querySelectorAll("button")[1].addEventListener("click", () => _stepMapZoom(-1));
-  mapRoot.appendChild(zoomControl);
-
-  const layerControl = _buildMapLayerControl();
-  mapRoot.appendChild(layerControl);
-
   const symbolsBox = document.createElement("div"); symbolsBox.className = "map-symbols-box";
   symbolsBox.innerHTML = '<div style="font-weight:600">Symbols</div><div class="map-symbols-row"><div class="map-symbol-dot"></div><div>GPS point</div></div><div class="map-symbols-row"><div class="map-symbol-line"></div><div>Travel path</div></div>';
   mapRoot.appendChild(symbolsBox);
-
-  const scaleBar = document.createElement("div");
-  scaleBar.className = "map-scale-bar";
-  scaleBar.innerHTML = '<div class="map-scale-bar-line"></div><div class="map-scale-bar-label"></div>';
-  mapRoot.appendChild(scaleBar);
-
-  const attribution = document.createElement("div");
-  attribution.className = "map-attribution";
-  mapRoot.appendChild(attribution);
 
   const mapInfoPanel = document.getElementById("mapInfoPanel");
   if (mapInfoPanel) { mapRoot.appendChild(mapInfoPanel); mapInfoPanel.classList.remove("active"); }
@@ -1979,9 +1961,9 @@ function renderMapView() {
   mapRenderState = {
     displayEvents,
     path: displayEvents.map(e => [e.lon, e.lat]),
-    scaleLine: scaleBar.querySelector(".map-scale-bar-line"),
-    scaleLabel: scaleBar.querySelector(".map-scale-bar-label"),
-    attributionEl: attribution
+    scaleLine: null,
+    scaleLabel: null,
+    attributionEl: null
   };
 
   mapViewState = _fitMapViewState(mapContainer, displayEvents);
