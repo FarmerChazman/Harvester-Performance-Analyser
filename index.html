@@ -548,29 +548,38 @@ function _expandTileUrl(urlTemplate, x, y, z) {
     .replace("{y}", String(y))
     .replace("{z}", String(z));
 }
+// deck.gl substitutes {x}/{y}/{z} itself but NOT {s}. For subdomained
+// templates we hand deck.gl an array of URLs so it round-robins them.
+function _expandSubdomains(urlTemplate) {
+  if (urlTemplate.indexOf("{s}") === -1) return urlTemplate;
+  return ["a", "b", "c"].map((s) => urlTemplate.replace("{s}", s));
+}
 function _makeTileLayer(id, urlTemplate, maxZoom) {
   return new deck.TileLayer({
     id,
     minZoom: 0,
     maxZoom: maxZoom || 20,
     tileSize: 256,
-    data: ({ x, y, z }) => _expandTileUrl(urlTemplate, x, y, z),
+    // IMPORTANT: data must be a URL template string (or array of strings),
+    // NOT a function. deck.gl builds each tile URL from {x}/{y}/{z} and loads
+    // the image as an ImageBitmap before calling renderSubLayers.
+    data: _expandSubdomains(urlTemplate),
+    loadOptions: { image: { type: "imagebitmap" }, fetch: { mode: "cors" } },
+    onTileError: (err) => console.warn(`Tile load failed for ${id}:`, err && err.message),
     renderSubLayers: (props) => {
-      const { x, y, z } = props.tile.index;
-      const west = _tile2long(x, z);
-      const east = _tile2long(x + 1, z);
-      const north = _tile2lat(y, z);
-      const south = _tile2lat(y + 1, z);
+      const { boundingBox } = props.tile;
       return new deck.BitmapLayer(props, {
-        id: `${id}-${x}-${y}-${z}`,
+        // null out the inherited URL-template data so BitmapLayer uses `image`
+        data: null,
         image: props.data,
-        bounds: [west, south, east, north]
+        bounds: [boundingBox[0][0], boundingBox[0][1], boundingBox[1][0], boundingBox[1][1]]
       });
     }
   });
 }
 function _makeBasemapLayers() {
-  const config = MAP_BASEMAPS.googleHybrid;
+  // Respect the currently-selected basemap instead of hardcoding Google.
+  const config = MAP_BASEMAPS[mapBaseLayerId] || MAP_BASEMAPS.googleHybrid;
   return config.layers.map((layer) => _makeTileLayer(layer.id, layer.urlTemplate, layer.maxZoom));
 }
 function _nextPaint() {
